@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+.wrangler/
+.env
+*.log
+__pycache__/
+.pytest_cache/
+.venv/
+personagraph-data/
+.DS_Store
+.vinext/
+.openai

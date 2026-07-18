@@ -1,0 +1,10 @@
+People and delivery notes
+
+Jordan Lee leads the Phoenix migration and owns the rollout plan. Jordan joined the program in 2023 and runs the weekly delivery review.
+
+Maya Patel is the security reviewer. Maya coordinates the access review with Jordan Lee and signs off on the production readiness checklist.
+
+Elliot Chen manages the vendor relationship. Elliot presents progress every Friday and escalates contract risks to Jordan Lee.
+
+Priya Nair is the executive sponsor. Priya reviews milestones at the end of each month and approves changes to the program scope.
+

@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+import math
+import re
+from collections import Counter
+
+from .store import Store
+
+
+STOP_WORDS = {
+    "about", "after", "also", "and", "are", "but", "can", "did", "does", "for", "from",
+    "had", "has", "have", "her", "here", "him", "his", "how", "into", "its", "more",
+    "our", "she", "tell", "than", "that", "the", "their", "them", "there", "these", "they",
+    "this", "those", "was", "were", "what", "when", "where", "which", "who", "why", "will",
+    "with", "would", "you", "your",
+}
+
+
+def tokenize(text: str) -> list[str]:
+    return [
+        token for token in re.findall(r"[a-z0-9][a-z0-9'-]+", text.casefold())
+        if len(token) > 2 and token not in STOP_WORDS
+    ]
+
+
+def identify_people(question: str, known_people: list[dict], explicit: str | None) -> list[str]:
+    if explicit:
+        return [explicit]
+    folded_question = question.casefold()
+    exact = [person["name"] for person in known_people if person["normalized"] in folded_question]
+    if exact:
+        return exact
+
+    question_tokens = set(tokenize(question))
+    first_name_matches = [
+        person["name"] for person in known_people
+        if person["name"].split()[0].casefold() in question_tokens
+    ]
+    first_names = Counter(name.split()[0].casefold() for name in first_name_matches)
+    return [
+        name for name in first_name_matches
+        if first_names[name.split()[0].casefold()] == 1
+    ]
+
+
+def retrieve(
+    store: Store,
+    question: str,
+    document_ids: list[str] | None,
+    explicit_person: str | None,
+    top_k: int,
+) -> tuple[list[str], list[dict]]:
+    chunks = store.get_chunks(document_ids)
+    known_people = store.list_people(document_ids)
+    people = identify_people(question, known_people, explicit_person)
+    if not chunks:
+        return people, []
+
+    query_terms = tokenize(question + " " + " ".join(people))
+    document_frequency: Counter[str] = Counter()
+    tokenized_chunks: list[list[str]] = []
+    for chunk in chunks:
+        tokens = tokenize(chunk["content"])
+        tokenized_chunks.append(tokens)
+        document_frequency.update(set(tokens))
+
+    average_length = sum(map(len, tokenized_chunks)) / max(len(tokenized_chunks), 1)
+    scored: list[tuple[float, dict]] = []
+    for chunk, tokens in zip(chunks, tokenized_chunks, strict=True):
+        frequencies = Counter(tokens)
+        score = 0.0
+        for term in set(query_terms):
+            frequency = frequencies[term]
+            if not frequency:
+                continue
+            inverse_frequency = math.log(
+                1 + (len(chunks) - document_frequency[term] + 0.5) / (document_frequency[term] + 0.5)
+            )
+            denominator = frequency + 1.2 * (0.25 + 0.75 * len(tokens) / max(average_length, 1))
+            score += inverse_frequency * ((frequency * 2.2) / denominator)
+
+        folded_content = chunk["content"].casefold()
+        for person in people:
+            if person.casefold() in folded_content:
+                score += 4.0
+            elif person.split()[0].casefold() in folded_content:
+                score += 1.0
+        if score > 0:
+            scored.append((score, chunk))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    chosen = scored[:top_k]
+    if not chosen:
+        return people, []
+    maximum = chosen[0][0]
+    sources = [
+        {
+            "index": index,
+            "document_id": chunk["document_id"],
+            "filename": chunk["filename"],
+            "page": chunk["page"],
+            "excerpt": chunk["content"][:560],
+            "score": round(score / maximum, 3),
+        }
+        for index, (score, chunk) in enumerate(chosen, start=1)
+    ]
+    return people, sources
+
+
+def _best_sentence(excerpt: str, query_terms: set[str], people: list[str]) -> str:
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", excerpt) if sentence.strip()]
+    if not sentences:
+        return excerpt.strip()
+
+    def rank(sentence: str) -> tuple[int, int]:
+        folded = sentence.casefold()
+        person_hits = sum(1 for person in people if person.casefold() in folded)
+        overlap = len(query_terms & set(tokenize(sentence)))
+        return person_hits, overlap
+
+    return max(sentences, key=rank)
+
+
+def synthesize_answer(question: str, people: list[str], sources: list[dict]) -> str:
+    if not sources:
+        person_phrase = f" about {', '.join(people)}" if people else ""
+        return (
+            f"I couldn’t find grounded evidence{person_phrase} in the selected documents. "
+            "Try another name, include more context, or search across all documents."
+        )
+
+    query_terms = set(tokenize(question))
+    claims: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        sentence = _best_sentence(source["excerpt"], query_terms, people)
+        key = sentence.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        claims.append(f"{sentence} [{source['index']}]")
+        if len(claims) == 3:
+            break
+
+    subject = ", ".join(people) if people else "the people in your documents"
+    if len(claims) == 1:
+        return f"Here’s what I found about {subject}:\n\n{claims[0]}"
+    bullets = "\n".join(f"- {claim}" for claim in claims)
+    return f"Here’s what I found about {subject}:\n\n{bullets}"
+
