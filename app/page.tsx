@@ -52,6 +52,12 @@ function citationLabel(source: Source) {
   return source.page ? `${source.filename} · p. ${source.page}` : source.filename;
 }
 
+function answerModeLabel(mode: string) {
+  if (mode === "local-grounded") return "Local grounded synthesis";
+  if (mode.startsWith("cerebras:")) return `Cerebras · ${mode.slice("cerebras:".length)}`;
+  return mode;
+}
+
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, options);
   if (!response.ok) {
@@ -109,10 +115,32 @@ export default function Home() {
   }
 
   useEffect(() => {
-    Promise.all([api("/api/health"), refreshLibrary()])
-      .then(() => setConnected(true))
-      .catch((error: Error) => setNotice(error.message))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+
+    async function initialize() {
+      try {
+        const [, nextDocuments, nextPeople] = await Promise.all([
+          api("/api/health"),
+          api<DocumentRecord[]>("/api/documents"),
+          api<PersonRecord[]>("/api/people"),
+        ]);
+        if (cancelled) return;
+        setDocuments(nextDocuments);
+        setPeople(nextPeople);
+        setConnected(true);
+      } catch (error) {
+        if (!cancelled) {
+          setNotice(error instanceof Error ? error.message : "Could not connect to the API.");
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void initialize();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -385,7 +413,7 @@ export default function Home() {
                         ))}
                       </div>
                     )}
-                    {message.mode && <span className="answer-mode">{message.mode.replace("local-grounded", "Local grounded synthesis")}</span>}
+                    {message.mode && <span className="answer-mode">{answerModeLabel(message.mode)}</span>}
                   </div>
                 </article>
               ))}

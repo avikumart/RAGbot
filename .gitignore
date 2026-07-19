@@ -2,7 +2,8 @@ node_modules/
 dist/
 .next/
 .wrangler/
-.env
+.env*
+!.env.example
 *.log
 __pycache__/
 .pytest_cache/
@@ -10,4 +11,3 @@ __pycache__/
 personagraph-data/
 .DS_Store
 .vinext/
-.openai

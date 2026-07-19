@@ -60,6 +60,31 @@ def test_chat_retrieves_requested_person_with_citations(tmp_path):
         client.__exit__(None, None, None)
 
 
+def test_chat_uses_cerebras_when_api_key_is_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-api-key")
+
+    async def fake_cerebras(**kwargs):
+        assert kwargs["api_key"] == "test-api-key"
+        assert kwargs["base_url"] == "https://api.cerebras.ai/v1"
+        assert kwargs["model"] == "gpt-oss-120b"
+        assert kwargs["sources"]
+        return "Jordan Lee owns the rollout plan [1]."
+
+    monkeypatch.setattr("app.main.generate_with_cerebras", fake_cerebras)
+    client, document = client_with_sample(tmp_path)
+    try:
+        response = client.post(
+            "/api/chat",
+            json={"message": "What does Jordan Lee own?", "document_ids": [document["id"]]},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mode"] == "cerebras:gpt-oss-120b"
+        assert payload["answer"] == "Jordan Lee owns the rollout plan [1]."
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_chat_honors_document_scope(tmp_path):
     client, document = client_with_sample(tmp_path)
     try:
@@ -95,4 +120,3 @@ def test_empty_library_and_unsupported_file_are_clear(tmp_path):
         )
         assert upload.status_code == 422
         assert "Supported formats" in upload.json()["detail"]
-
