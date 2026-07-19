@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .extraction import ExtractionError, chunk_pages, count_people, extract_pages
-from .llm import generate_with_ollama
+from .llm import generate_with_cerebras
 from .retrieval import retrieve, synthesize_answer
 from .store import Store
 
@@ -112,9 +112,10 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             payload.person,
             payload.top_k,
         )
-        generated = await generate_with_ollama(
-            base_url=settings.ollama_base_url,
-            model=settings.ollama_model,
+        generated = await generate_with_cerebras(
+            api_key=settings.cerebras_api_key,
+            base_url=settings.cerebras_base_url,
+            model=settings.cerebras_model,
             question=payload.message,
             sources=sources,
         )
@@ -122,7 +123,7 @@ def create_app(data_dir: Path | None = None) -> FastAPI:
             "answer": generated or synthesize_answer(payload.message, identified_people, sources),
             "people": identified_people,
             "sources": sources,
-            "mode": f"ollama:{settings.ollama_model}" if generated else "local-grounded",
+            "mode": f"cerebras:{settings.cerebras_model}" if generated else "local-grounded",
         }
 
     return app

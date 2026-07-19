@@ -9,8 +9,9 @@ from pathlib import Path
 class Settings:
     data_dir: Path
     max_upload_bytes: int
-    ollama_base_url: str
-    ollama_model: str
+    cerebras_api_key: str
+    cerebras_base_url: str
+    cerebras_model: str
     cors_origins: tuple[str, ...]
 
     @classmethod
@@ -23,8 +24,11 @@ class Settings:
         return cls(
             data_dir=resolved_data_dir,
             max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "").rstrip("/"),
-            ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+            cerebras_api_key=os.getenv("CEREBRAS_API_KEY", "").strip(),
+            cerebras_base_url=os.getenv(
+                "CEREBRAS_API_BASE_URL",
+                "https://api.cerebras.ai/v1",
+            ).rstrip("/"),
+            cerebras_model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
             cors_origins=tuple(origin.strip() for origin in origins.split(",") if origin.strip()),
         )
-
