@@ -53,6 +53,13 @@ class Store:
                     PRIMARY KEY (document_id, normalized)
                 );
                 CREATE INDEX IF NOT EXISTS people_normalized_idx ON people(normalized);
+                CREATE TABLE IF NOT EXISTS vector_index_state (
+                    document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL,
+                    embedding_model TEXT,
+                    error TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -104,6 +111,20 @@ class Store:
             "chunk_count": len(chunks),
             "people": sorted(people),
         }
+
+    def set_vector_status(
+        self, document_id: str, status: str, embedding_model: str, error: str | None = None
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO vector_index_state
+                (document_id, status, embedding_model, error, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                status=excluded.status, embedding_model=excluded.embedding_model,
+                error=excluded.error, updated_at=excluded.updated_at""",
+                (document_id, status, embedding_model, error, datetime.now(UTC).isoformat()),
+            )
 
     def list_documents(self) -> list[dict]:
         with self.connect() as connection:
@@ -168,6 +189,35 @@ class Store:
                 for row in rows
             ]
 
+    def get_chunks_by_ids(
+        self, chunk_ids: Iterable[int], document_ids: Iterable[str] | None = None
+    ) -> list[dict]:
+        ids = list(dict.fromkeys(chunk_ids))
+        if not ids:
+            return []
+        document_scope = list(document_ids or [])
+        clauses = [f"chunks.id IN ({','.join('?' for _ in ids)})"]
+        params: list[str | int] = list(ids)
+        if document_scope:
+            clauses.append(
+                f"chunks.document_id IN ({','.join('?' for _ in document_scope)})"
+            )
+            params.extend(document_scope)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT chunks.*, documents.filename
+                FROM chunks JOIN documents ON documents.id = chunks.document_id
+                WHERE {' AND '.join(clauses)}""",
+                params,
+            ).fetchall()
+            return [{**dict(row), "people": json.loads(row["people_json"])} for row in rows]
+
+    def document_exists(self, document_id: str) -> bool:
+        with self.connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM documents WHERE id = ?", (document_id,)
+            ).fetchone() is not None
+
     def delete_document(self, document_id: str) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -180,4 +230,3 @@ class Store:
         if path.exists() and self.upload_dir in path.parents:
             path.unlink()
         return True
-

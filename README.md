@@ -2,7 +2,7 @@
 
 Personagraph is a local-first prototype for asking questions about people mentioned in personal documents. It accepts PDF, DOCX, TXT, and Markdown files, indexes likely names and supporting passages, retrieves person-specific context, and returns answers with expandable citations.
 
-The default experience is fully usable without an API key or model download. It uses deterministic grounded synthesis over a lightweight hybrid retrieval index. When a Cerebras API key is configured, the same retrieved evidence is sent to the `gpt-oss-120b` model for generation. The API falls back safely to local grounded synthesis if Cerebras is not configured or unavailable.
+The default experience uses local hybrid retrieval: BM25-style lexical search plus semantic search with local embeddings in Qdrant. Answer generation remains deterministic and grounded unless a Cerebras API key is configured. No API key is needed for embeddings, and document content is not sent to an embedding service.
 
 ## Run locally with Docker
 
@@ -25,7 +25,9 @@ Then open:
 - App: <http://localhost:3000>
 - API documentation: <http://localhost:8000/docs>
 
-Try the included `examples/people-notes.txt`, or upload one of your own documents. Files and the SQLite index persist in the `personagraph_data` Docker volume.
+Try the included `examples/people-notes.txt`, or upload one of your own documents. Files and the authoritative SQLite database persist in `personagraph_data`; derived Qdrant vectors persist separately in `qdrant_data`. The embedding model cache uses `embedding_cache`.
+
+The first upload downloads `BAAI/bge-small-en-v1.5` into the local model-cache volume. It is a 384-dimensional, MIT-licensed English embedding model; expect roughly 130 MB of model data plus runtime overhead. Later starts reuse the cache.
 
 To stop the app:
 
@@ -33,11 +35,43 @@ To stop the app:
 docker compose down
 ```
 
-To also erase uploaded documents and the local index:
+To also erase uploaded documents, SQLite, model cache, and vectors:
 
 ```bash
 docker compose down --volumes
 ```
+
+Qdrant has no host port in this production-shaped Compose setup. Only the API reaches it on the internal network. Removing only the `personagraph_qdrant_data` volume does not affect uploaded files or SQLite; run the backfill below to rebuild it.
+
+## Vector retrieval configuration
+
+Defaults are shown in `.env.example`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VECTOR_SEARCH_ENABLED` | `true` | Enable indexing and hybrid retrieval; set `false` for lexical-only operation. |
+| `QDRANT_URL` | `http://qdrant:6333` | Qdrant address. Compose fixes this to its internal service URL. |
+| `QDRANT_COLLECTION` | `personagraph_chunks` | Vector collection name. |
+| `EMBEDDING_PROVIDER` | `local` | Embedding provider; only local FastEmbed is supported currently. |
+| `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Exact embedding model identifier. |
+| `EMBEDDING_DIMENSIONS` | `384` | Must match the model and collection. |
+| `EMBEDDING_BATCH_SIZE` | `32` | Chunk indexing batch size. |
+| `VECTOR_CANDIDATE_LIMIT` | `20` | Maximum semantic candidates before rank fusion. |
+| `LEXICAL_CANDIDATE_LIMIT` | `20` | Maximum lexical candidates before rank fusion. |
+| `VECTOR_TIMEOUT_SECONDS` | `5` | Qdrant operation timeout. |
+| `EMBEDDING_TIMEOUT_SECONDS` | `30` | Local embedding-operation timeout. |
+
+To backfill existing SQLite chunks, repair missing/outdated vectors, and remove orphan vectors:
+
+```bash
+docker compose run --rm api python -m app.vector_admin backfill
+```
+
+The command is idempotent and reports `processed`, `skipped`, `failed`, and `deleted` counts as JSON. It batches work, commits each vector upsert, and can be interrupted and rerun safely.
+
+Do not change the model or dimensions in an existing collection. Personagraph stores collection-level model metadata and refuses model/dimension mismatches. To switch models safely, choose a new `QDRANT_COLLECTION` name and correct `EMBEDDING_DIMENSIONS`, restart the API, then run the backfill. The old collection can be removed after the new index is verified.
+
+If `/api/health` reports Qdrant or embeddings as degraded, check `docker compose logs api qdrant`, confirm the model cache has download space, and verify the collection/model/dimension settings. Uploads remain stored in SQLite and chat automatically uses lexical retrieval, with `retrieval_mode: "lexical-fallback"`, until vector service recovers. Run backfill afterward to repair missed indexing.
 
 ## Cerebras API generation
 
@@ -66,7 +100,7 @@ Run the frontend server-render test, backend API tests, and Compose validation i
 ./scripts/local_checks.sh
 ```
 
-The API tests cover document persistence, person extraction, cited retrieval, per-document scoping, empty-library behavior, and unsupported file handling.
+The API and unit tests cover document persistence, vector payloads and IDs, hybrid fusion, person and document scoping, cited semantic retrieval, lexical fallback, deletion, idempotent backfill, orphan cleanup, empty-library behavior, and unsupported files.
 
 Pull requests run `.github/workflows/ci.yml`, which performs three independent checks:
 
@@ -79,16 +113,22 @@ The Cerebras tests are network-isolated and never require an API key or consume 
 ## Architecture
 
 - `app/`: responsive React/vinext browser client
-- `backend/app/`: FastAPI ingestion, SQLite storage, person-aware retrieval, and optional Cerebras generation
+- `backend/app/`: FastAPI ingestion, authoritative SQLite storage, local embeddings, Qdrant indexing, hybrid retrieval, and optional Cerebras generation
 - `backend/tests/`: end-to-end API tests using a temporary data directory
-- `docker-compose.yml`: production-shaped local web/API images and persistent volume
+- `docker-compose.yml`: production-shaped web/API/Qdrant stack with separate persistent volumes
 
-Retrieval is intentionally lightweight for a personal prototype: BM25-style lexical ranking plus exact person boosts. This keeps the first run private, predictable, and fast. For a larger corpus, the retrieval module is the seam to replace with a vector database and embedding model.
+SQLite is the system of record for documents, stored-file metadata, extracted chunks, people, and their relationships. Qdrant stores only rebuildable embeddings, content hashes, model identifiers, scoping metadata, and SQLite document/chunk references—never authoritative chunk text. Upload commits SQLite first and then indexes vectors in batches. A failed vector step marks the document for reindex without rolling back SQLite.
+
+At query time Personagraph scopes both retrieval paths, identifies people using existing behavior, and combines lexical and vector ranks with deterministic Reciprocal Rank Fusion. Person boosts are applied after fusion. Every Qdrant hit is checked against scoped SQLite rows, and source excerpts, filenames, and pages always come from SQLite. This also prevents stale vectors for deleted documents from reaching an answer.
+
+Deletion removes SQLite rows and the stored file first, then deletes matching vectors. If Qdrant is unavailable, deletion still succeeds; the next backfill/reconciliation removes the orphan. Qdrant loss cannot cause document or metadata loss.
 
 ## Privacy and limitations
 
 - Uploaded bytes and the SQLite index stay in the local Docker volume.
+- Local embedding sends no text to a hosted service. Qdrant runs only on the Compose network by default, and its payload is not an authorization boundary.
 - When `CEREBRAS_API_KEY` is configured, each question and its retrieved source excerpts are sent to the Cerebras API. The application does not send the complete document unless its full contents happen to be selected as retrieved excerpts.
+- An external embedding provider is intentionally not enabled by default. If one is added later, sending chunk text externally must be an explicit configuration choice with the provider's privacy terms reviewed.
 - Name recognition is heuristic and may include organizations or miss uncommon name formats.
 - Text-based PDFs are supported; scanned PDFs need OCR before upload.
 - This is a prototype without user accounts or document-level access control. Do not expose it directly to the public internet.

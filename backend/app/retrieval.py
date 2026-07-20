@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 import re
+import logging
 from collections import Counter
+from dataclasses import dataclass
 
 from .store import Store
+from .vector_service import VectorService
 
 
 STOP_WORDS = {
@@ -14,6 +17,13 @@ STOP_WORDS = {
     "this", "those", "was", "were", "what", "when", "where", "which", "who", "why", "will",
     "with", "would", "you", "your",
 }
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RankedChunk:
+    chunk_id: int
+    score: float
 
 
 def tokenize(text: str) -> list[str]:
@@ -43,19 +53,11 @@ def identify_people(question: str, known_people: list[dict], explicit: str | Non
     ]
 
 
-def retrieve(
-    store: Store,
-    question: str,
-    document_ids: list[str] | None,
-    explicit_person: str | None,
-    top_k: int,
-) -> tuple[list[str], list[dict]]:
-    chunks = store.get_chunks(document_ids)
-    known_people = store.list_people(document_ids)
-    people = identify_people(question, known_people, explicit_person)
+def lexical_candidates(
+    chunks: list[dict], question: str, people: list[str], limit: int
+) -> list[RankedChunk]:
     if not chunks:
-        return people, []
-
+        return []
     query_terms = tokenize(question + " " + " ".join(people))
     document_frequency: Counter[str] = Counter()
     tokenized_chunks: list[list[str]] = []
@@ -65,7 +67,7 @@ def retrieve(
         document_frequency.update(set(tokens))
 
     average_length = sum(map(len, tokenized_chunks)) / max(len(tokenized_chunks), 1)
-    scored: list[tuple[float, dict]] = []
+    scored: list[RankedChunk] = []
     for chunk, tokens in zip(chunks, tokenized_chunks, strict=True):
         frequencies = Counter(tokens)
         score = 0.0
@@ -86,12 +88,79 @@ def retrieve(
             elif person.split()[0].casefold() in folded_content:
                 score += 1.0
         if score > 0:
-            scored.append((score, chunk))
+            scored.append(RankedChunk(int(chunk["id"]), score))
+    return sorted(scored, key=lambda item: (-item.score, item.chunk_id))[:limit]
 
-    scored.sort(key=lambda item: item[0], reverse=True)
-    chosen = scored[:top_k]
+
+def reciprocal_rank_fusion(
+    lexical: list[RankedChunk], vector: list[RankedChunk], rank_constant: int = 60
+) -> dict[int, float]:
+    fused: dict[int, float] = {}
+    for ranking in (lexical, vector):
+        for rank, candidate in enumerate(ranking, start=1):
+            fused[candidate.chunk_id] = fused.get(candidate.chunk_id, 0.0) + 1.0 / (
+                rank_constant + rank
+            )
+    return fused
+
+
+def hybrid_retrieve(
+    store: Store,
+    question: str,
+    document_ids: list[str] | None,
+    explicit_person: str | None,
+    top_k: int,
+    vector_service: VectorService | None = None,
+    lexical_limit: int = 20,
+    vector_limit: int = 20,
+) -> tuple[list[str], list[dict], str]:
+    chunks = store.get_chunks(document_ids)
+    known_people = store.list_people(document_ids)
+    people = identify_people(question, known_people, explicit_person)
+    if not chunks:
+        return people, [], "lexical"
+
+    lexical = lexical_candidates(chunks, question, people, lexical_limit)
+    vector: list[RankedChunk] = []
+    retrieval_mode = "lexical"
+    if vector_service and vector_service.enabled:
+        try:
+            raw_vector = vector_service.search(question, document_ids, vector_limit)
+            # Qdrant is derived state: only candidates still present in scoped SQLite
+            # rows are eligible for answers and citations.
+            valid = {
+                int(chunk["id"]): chunk
+                for chunk in store.get_chunks_by_ids(
+                    [candidate.chunk_id for candidate in raw_vector], document_ids
+                )
+            }
+            vector = [
+                RankedChunk(candidate.chunk_id, candidate.score)
+                for candidate in raw_vector
+                if candidate.chunk_id in valid
+                and valid[candidate.chunk_id]["document_id"] == candidate.document_id
+            ]
+            retrieval_mode = "hybrid"
+        except Exception as exc:
+            retrieval_mode = "lexical-fallback"
+            logger.warning("Vector retrieval unavailable; using lexical retrieval: %s", exc)
+
+    fused = reciprocal_rank_fusion(lexical, vector)
+    chunk_by_id = {int(chunk["id"]): chunk for chunk in chunks}
+    for chunk_id in list(fused):
+        content = chunk_by_id.get(chunk_id, {}).get("content", "").casefold()
+        for person in people:
+            if person.casefold() in content:
+                fused[chunk_id] += 0.04
+            elif person.split()[0].casefold() in content:
+                fused[chunk_id] += 0.01
+
+    chosen = sorted(
+        ((score, chunk_by_id[chunk_id]) for chunk_id, score in fused.items() if chunk_id in chunk_by_id),
+        key=lambda item: (-item[0], int(item[1]["id"])),
+    )[:top_k]
     if not chosen:
-        return people, []
+        return people, [], retrieval_mode
     maximum = chosen[0][0]
     sources = [
         {
@@ -104,6 +173,20 @@ def retrieve(
         }
         for index, (score, chunk) in enumerate(chosen, start=1)
     ]
+    return people, sources, retrieval_mode
+
+
+def retrieve(
+    store: Store,
+    question: str,
+    document_ids: list[str] | None,
+    explicit_person: str | None,
+    top_k: int,
+) -> tuple[list[str], list[dict]]:
+    """Backward-compatible lexical-only entry point."""
+    people, sources, _ = hybrid_retrieve(
+        store, question, document_ids, explicit_person, top_k
+    )
     return people, sources
 
 
@@ -147,4 +230,3 @@ def synthesize_answer(question: str, people: list[str], sources: list[dict]) -> 
         return f"Here’s what I found about {subject}:\n\n{claims[0]}"
     bullets = "\n".join(f"- {claim}" for claim in claims)
     return f"Here’s what I found about {subject}:\n\n{bullets}"
-
