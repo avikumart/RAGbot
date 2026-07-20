@@ -3,6 +3,7 @@ FROM python:3.12-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PERSONA_DATA_DIR=/data \
+    HF_HOME=/models \
     PYTHONPATH=/app
 
 WORKDIR /app
@@ -20,8 +21,8 @@ FROM base AS runtime
 COPY app ./app
 
 RUN useradd --create-home --uid 10001 appuser \
-    && mkdir -p /data \
-    && chown -R appuser:appuser /app /data
+    && mkdir -p /data /models \
+    && chown -R appuser:appuser /app /data /models
 
 USER appuser
 EXPOSE 8000

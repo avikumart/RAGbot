@@ -13,6 +13,17 @@ class Settings:
     cerebras_base_url: str
     cerebras_model: str
     cors_origins: tuple[str, ...]
+    vector_search_enabled: bool
+    qdrant_url: str
+    qdrant_collection: str
+    embedding_provider: str
+    embedding_model: str
+    embedding_dimensions: int
+    embedding_batch_size: int
+    vector_candidate_limit: int
+    lexical_candidate_limit: int
+    vector_timeout_seconds: float
+    embedding_timeout_seconds: float
 
     @classmethod
     def from_env(cls, data_dir: Path | None = None) -> "Settings":
@@ -31,4 +42,18 @@ class Settings:
             ).rstrip("/"),
             cerebras_model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
             cors_origins=tuple(origin.strip() for origin in origins.split(",") if origin.strip()),
+            vector_search_enabled=os.getenv("VECTOR_SEARCH_ENABLED", "true").casefold()
+            in {"1", "true", "yes", "on"},
+            qdrant_url=os.getenv("QDRANT_URL", "http://qdrant:6333").rstrip("/"),
+            qdrant_collection=os.getenv("QDRANT_COLLECTION", "personagraph_chunks"),
+            embedding_provider=os.getenv("EMBEDDING_PROVIDER", "local").casefold(),
+            embedding_model=os.getenv(
+                "EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5"
+            ),
+            embedding_dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "384")),
+            embedding_batch_size=int(os.getenv("EMBEDDING_BATCH_SIZE", "32")),
+            vector_candidate_limit=int(os.getenv("VECTOR_CANDIDATE_LIMIT", "20")),
+            lexical_candidate_limit=int(os.getenv("LEXICAL_CANDIDATE_LIMIT", "20")),
+            vector_timeout_seconds=float(os.getenv("VECTOR_TIMEOUT_SECONDS", "5")),
+            embedding_timeout_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "30")),
         )

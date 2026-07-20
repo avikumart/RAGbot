@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.vector_store import VectorCandidate
 
 
 SAMPLE = b"""People notes
@@ -120,3 +121,61 @@ def test_empty_library_and_unsupported_file_are_clear(tmp_path):
         )
         assert upload.status_code == 422
         assert "Supported formats" in upload.json()["detail"]
+
+
+class FakeApiVectors:
+    enabled = True
+
+    def __init__(self):
+        self.indexed = []
+        self.deleted = []
+        self.candidates = []
+
+    def health(self):
+        return {
+            "vector_database": {"status": "ready"},
+            "embedding_model": {"status": "ready"},
+        }
+
+    def index_document(self, document_id):
+        self.indexed.append(document_id)
+        return 1, 0
+
+    def search(self, question, document_ids, limit):
+        return self.candidates[:limit]
+
+    def delete_document(self, document_id):
+        self.deleted.append(document_id)
+
+
+def test_upload_semantic_retrieval_and_delete_use_vector_layer(tmp_path, monkeypatch):
+    monkeypatch.setenv("VECTOR_SEARCH_ENABLED", "true")
+    vectors = FakeApiVectors()
+    app = create_app(tmp_path, vector_service=vectors)
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents",
+            files={
+                "file": (
+                    "rollout.txt",
+                    b"Jordan owns the rollout plan.",
+                    "text/plain",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+        assert vectors.indexed == [document_id]
+
+        chunk = app.state.store.get_chunks([document_id])[0]
+        vectors.candidates = [VectorCandidate(chunk["id"], document_id, 0.95)]
+        chat = client.post(
+            "/api/chat", json={"message": "Who is responsible for deployment?"}
+        )
+        assert chat.status_code == 200
+        assert chat.json()["retrieval_mode"] == "hybrid"
+        assert chat.json()["sources"][0]["filename"] == "rollout.txt"
+
+        deletion = client.delete(f"/api/documents/{document_id}")
+        assert deletion.status_code == 200
+        assert vectors.deleted == [document_id]
