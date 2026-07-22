@@ -101,6 +101,7 @@ export default function Home() {
   const [connected, setConnected] = useState(false);
 
   const scopedDocument = documents.find((document) => document.id === selectedDocument);
+  const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
   const visiblePeople = selectedDocument === "all"
     ? people
     : people.filter((person) => scopedDocument?.people.includes(person.name));
@@ -295,6 +296,7 @@ export default function Home() {
             type="button"
             className={`document-item all-documents ${selectedDocument === "all" ? "is-active" : ""}`}
             onClick={() => setSelectedDocument("all")}
+            aria-current={selectedDocument === "all" ? "true" : undefined}
           >
             <span className="document-icon">◎</span>
             <span className="document-copy">
@@ -302,7 +304,22 @@ export default function Home() {
               <small>{people.length} people in scope</small>
             </span>
           </button>
-          {documents.map((document) => (
+          {loading ? (
+            <div className="document-state" role="status">
+              <span className="state-spinner" aria-hidden="true" />
+              <span>Loading your library…</span>
+            </div>
+          ) : uploading ? (
+            <div className="document-state is-indexing" role="status">
+              <span className="state-spinner" aria-hidden="true" />
+              <span>Indexing document…</span>
+            </div>
+          ) : !documents.length ? (
+            <div className="document-state">
+              <span aria-hidden="true">◇</span>
+              <span>Your uploaded documents will appear here.</span>
+            </div>
+          ) : documents.map((document) => (
             <div className={`document-row ${selectedDocument === document.id ? "is-active" : ""}`} key={document.id}>
               <button
                 type="button"
@@ -311,18 +328,28 @@ export default function Home() {
                   setSelectedDocument(document.id);
                   if (selectedPerson && !document.people.includes(selectedPerson)) setSelectedPerson(null);
                 }}
+                aria-current={selectedDocument === document.id ? "true" : undefined}
+                title={document.filename}
               >
                 <span className="file-badge">{documentKind(document.filename)}</span>
                 <span className="document-copy">
-                  <strong>{document.filename}</strong>
-                  <small>{humanSize(document.size_bytes)} · {document.people.length} people</small>
+                  <strong title={document.filename}>{document.filename}</strong>
+                  <small className="document-meta">
+                    <span>{documentKind(document.filename)}</span>
+                    <span>{humanSize(document.size_bytes)}</span>
+                    <span>{document.people.length} {document.people.length === 1 ? "person" : "people"}</span>
+                  </small>
                 </span>
               </button>
               <button
                 className="remove-button"
                 type="button"
                 aria-label={`Remove ${document.filename}`}
-                onClick={() => void removeDocument(document)}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void removeDocument(document);
+                }}
               >
                 ×
               </button>
@@ -463,40 +490,53 @@ export default function Home() {
       </section>
 
       <aside className="people-panel">
-        <div className="people-header">
-          <span className="eyebrow">People in scope</span>
-          <span className="people-count">{visiblePeople.length}</span>
-        </div>
-        {visiblePeople.length ? (
-          <div className="people-list">
-            {visiblePeople.map((person, index) => (
-              <button
-                type="button"
-                className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
-                key={person.normalized}
-                onClick={() => choosePerson(person.name)}
-              >
-                <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
-                <span>
-                  <strong>{person.name}</strong>
-                  <small>{person.mentions} indexed {person.mentions === 1 ? "passage" : "passages"}</small>
-                </span>
-                <b aria-hidden="true">›</b>
-              </button>
-            ))}
+        <details className="side-panel-details" open>
+          <summary className="people-header">
+            <span className="eyebrow">Library activity</span>
+            <span className="details-toggle" aria-hidden="true">⌄</span>
+          </summary>
+          <div className="library-stats" aria-label="Library activity summary">
+            <div><strong>{documents.length}</strong><span>documents</span></div>
+            <div><strong>{totalChunks}</strong><span>chunks indexed</span></div>
+            <div><strong>{people.length}</strong><span>people found</span></div>
           </div>
-        ) : (
-          <div className="people-empty">
-            <span>◇</span>
-            <p>People will appear here after your first document is indexed.</p>
+          {uploading && <p className="indexing-status" role="status"><span className="state-spinner" aria-hidden="true" /> Indexing your upload</p>}
+          <div className="people-heading">
+            <span className="eyebrow">People in scope</span>
+            <span className="people-count">{visiblePeople.length}</span>
           </div>
-        )}
-
-        <div className="scope-card">
-          <span>Retrieval scope</span>
-          <strong>{selectedDocument === "all" ? "Entire library" : "One document"}</strong>
-          <p>{selectedDocument === "all" ? "Searching every indexed passage." : scopedDocument?.filename}</p>
-        </div>
+          {loading ? (
+            <div className="people-empty people-loading" role="status"><span className="state-spinner" aria-hidden="true" /><p>Loading people…</p></div>
+          ) : visiblePeople.length ? (
+            <div className="people-list">
+              {visiblePeople.map((person, index) => (
+                <button
+                  type="button"
+                  className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
+                  key={person.normalized}
+                  onClick={() => choosePerson(person.name)}
+                >
+                  <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
+                  <span>
+                    <strong>{person.name}</strong>
+                    <small>{person.mentions} indexed {person.mentions === 1 ? "passage" : "passages"}</small>
+                  </span>
+                  <b aria-hidden="true">›</b>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="people-empty">
+              <span>◇</span>
+              <p>{documents.length ? "No people were found in this document." : "People will appear here after your first document is indexed."}</p>
+            </div>
+          )}
+          <div className="scope-card">
+            <span>Retrieval scope</span>
+            <strong>{selectedDocument === "all" ? "Entire library" : "One document"}</strong>
+            <p title={selectedDocument === "all" ? "Searching every indexed passage." : scopedDocument?.filename}>{selectedDocument === "all" ? "Searching every indexed passage." : scopedDocument?.filename}</p>
+          </div>
+        </details>
       </aside>
     </main>
   );
