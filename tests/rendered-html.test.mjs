@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import { DocumentIndexStatus } from "../app/document-index-status.mjs";
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
@@ -23,4 +27,22 @@ test("server-renders the finished Personagraph interface", async () => {
   assert.match(html, /Check status/);
   assert.match(html, /Local by design/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
+});
+
+test("renders the four document indexing states accurately", () => {
+  const states = [
+    ["pending", "indexing", "Indexing"],
+    ["ready", "ready", "Ready"],
+    ["disabled", "lexical", "Lexical only"],
+    ["needs_reindex", "repair", "Needs repair"],
+  ];
+
+  for (const [status, tone, label] of states) {
+    const html = renderToStaticMarkup(
+      React.createElement(DocumentIndexStatus, { status }),
+    );
+    assert.match(html, new RegExp(`data-index-status="${tone}"`));
+    assert.match(html, new RegExp(`>${label}<\\/small>`));
+    if (status === "needs_reindex") assert.doesNotMatch(html, />Ready<\/small>/);
+  }
 });
