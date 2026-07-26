@@ -119,6 +119,8 @@ The Cerebras tests are network-isolated and never require an API key or consume 
 
 SQLite is the system of record for documents, stored-file metadata, extracted chunks, people, and their relationships. Qdrant stores only rebuildable embeddings, content hashes, model identifiers, scoping metadata, and SQLite document/chunk references—never authoritative chunk text. Upload commits SQLite first and then indexes vectors in batches. A failed vector step marks the document for reindex without rolling back SQLite.
 
+`GET /api/documents` includes `index_status`, `index_error`, and `index_updated_at` for every document. Status values currently include `pending`, `indexing`, `ready`, `needs_reindex`, and `disabled`. A document with no index-state row (for example, a legacy document) defaults to `pending`, with a null error and update timestamp. Index failures return a safe, actionable error message; internal exception details are retained only for diagnostics and are not exposed by this endpoint.
+
 At query time Personagraph scopes both retrieval paths, identifies people using existing behavior, and combines lexical and vector ranks with deterministic Reciprocal Rank Fusion. Person boosts are applied after fusion. Every Qdrant hit is checked against scoped SQLite rows, and source excerpts, filenames, and pages always come from SQLite. This also prevents stale vectors for deleted documents from reaching an answer.
 
 Deletion removes SQLite rows and the stored file first, then deletes matching vectors. If Qdrant is unavailable, deletion still succeeds; the next backfill/reconciliation removes the orphan. Qdrant loss cannot cause document or metadata loss.

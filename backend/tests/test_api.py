@@ -33,11 +33,34 @@ def test_upload_extracts_people_and_persists_document(tmp_path):
         assert document["chunk_count"] >= 1
         assert "Jordan Lee" in document["people"]
         assert "Maya Patel" in document["people"]
+        assert document["index_status"] == "disabled"
+        assert document["index_error"] is None
+        assert document["index_updated_at"] is not None
 
         documents = client.get("/api/documents").json()
         people = client.get("/api/people").json()
         assert documents[0]["id"] == document["id"]
+        assert documents[0]["index_status"] == "disabled"
+        assert documents[0]["index_error"] is None
+        assert documents[0]["index_updated_at"] is not None
         assert any(person["name"] == "Jordan Lee" for person in people)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_documents_endpoint_defaults_missing_index_status(tmp_path):
+    client, uploaded = client_with_sample(tmp_path)
+    try:
+        with client.app.state.store.connect() as connection:
+            connection.execute(
+                "DELETE FROM vector_index_state WHERE document_id = ?",
+                (uploaded["id"],),
+            )
+
+        document = client.get("/api/documents").json()[0]
+        assert document["index_status"] == "pending"
+        assert document["index_error"] is None
+        assert document["index_updated_at"] is None
     finally:
         client.__exit__(None, None, None)
 
@@ -146,6 +169,45 @@ class FakeApiVectors:
 
     def delete_document(self, document_id):
         self.deleted.append(document_id)
+
+
+class FailingApiVectors(FakeApiVectors):
+    def __init__(self):
+        super().__init__()
+        self.store = None
+
+    def index_document(self, document_id):
+        self.store.set_vector_status(
+            document_id,
+            "needs_reindex",
+            "test/model",
+            "Private host qdrant.internal rejected token=secret-value",
+        )
+        raise RuntimeError("Private host qdrant.internal rejected token=secret-value")
+
+
+def test_documents_endpoint_exposes_safe_failed_index_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("VECTOR_SEARCH_ENABLED", "true")
+    vectors = FailingApiVectors()
+    app = create_app(tmp_path, vector_service=vectors)
+    vectors.store = app.state.store
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents",
+            files={"file": ("failed.txt", SAMPLE, "text/plain")},
+        )
+        assert upload.status_code == 201
+
+        response = client.get("/api/documents")
+        assert response.status_code == 200
+        document = response.json()[0]
+        assert document["index_status"] == "needs_reindex"
+        assert document["index_error"] == (
+            "Document embeddings could not be generated. Retry indexing and check the status again."
+        )
+        assert document["index_updated_at"] is not None
+        assert "qdrant.internal" not in response.text
+        assert "secret-value" not in response.text
 
 
 def test_upload_semantic_retrieval_and_delete_use_vector_layer(tmp_path, monkeypatch):

@@ -20,7 +20,7 @@ test("server-renders the finished Personagraph interface", async () => {
   assert.match(html, /<title>Personagraph — Private document intelligence<\/title>/i);
   assert.match(html, /Ask the people/);
   assert.match(html, /Add a document/);
+  assert.match(html, /Check status/);
   assert.match(html, /Local by design/);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
-
