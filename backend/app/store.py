@@ -9,6 +9,12 @@ from pathlib import Path
 from .extraction import Chunk
 
 
+DEFAULT_INDEX_STATUS = "pending"
+PUBLIC_INDEX_ERROR = (
+    "Document embeddings could not be generated. Retry indexing and check the status again."
+)
+
+
 class Store:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir
@@ -129,7 +135,14 @@ class Store:
     def list_documents(self) -> list[dict]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM documents ORDER BY uploaded_at DESC"
+                """SELECT documents.*,
+                vector_index_state.status AS stored_index_status,
+                vector_index_state.error AS stored_index_error,
+                vector_index_state.updated_at AS stored_index_updated_at
+                FROM documents
+                LEFT JOIN vector_index_state
+                ON vector_index_state.document_id = documents.id
+                ORDER BY documents.uploaded_at DESC"""
             ).fetchall()
             result = []
             for row in rows:
@@ -146,9 +159,24 @@ class Store:
                         "uploaded_at": row["uploaded_at"],
                         "chunk_count": row["chunk_count"],
                         "people": [person["name"] for person in people],
+                        "index_status": row["stored_index_status"] or DEFAULT_INDEX_STATUS,
+                        "index_error": (
+                            PUBLIC_INDEX_ERROR if row["stored_index_error"] else None
+                        ),
+                        "index_updated_at": row["stored_index_updated_at"],
                     }
                 )
             return result
+
+    def get_document(self, document_id: str) -> dict | None:
+        return next(
+            (
+                document
+                for document in self.list_documents()
+                if document["id"] == document_id
+            ),
+            None,
+        )
 
     def list_people(self, document_ids: Iterable[str] | None = None) -> list[dict]:
         ids = list(document_ids or [])

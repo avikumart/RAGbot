@@ -12,6 +12,9 @@ type DocumentRecord = {
   uploaded_at: string;
   chunk_count: number;
   people: string[];
+  index_status: string;
+  index_error: string | null;
+  index_updated_at: string | null;
 };
 
 type PersonRecord = {
@@ -58,6 +61,14 @@ function answerModeLabel(mode: string) {
   return mode;
 }
 
+function indexStatusLabel(status: string) {
+  if (status === "ready") return "Embeddings ready";
+  if (status === "indexing") return "Generating embeddings";
+  if (status === "needs_reindex") return "Index needs attention";
+  if (status === "disabled") return "Embeddings disabled";
+  return "Index pending";
+}
+
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, options);
   if (!response.ok) {
@@ -95,6 +106,7 @@ export default function Home() {
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -102,6 +114,9 @@ export default function Home() {
 
   const scopedDocument = documents.find((document) => document.id === selectedDocument);
   const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
+  const hasIndexFailures = documents.some((document) => document.index_status === "needs_reindex");
+  const allIndexesReady = documents.length > 0
+    && documents.every((document) => document.index_status === "ready");
   const visiblePeople = selectedDocument === "all"
     ? people
     : people.filter((person) => scopedDocument?.people.includes(person.name));
@@ -113,6 +128,43 @@ export default function Home() {
     ]);
     setDocuments(nextDocuments);
     setPeople(nextPeople);
+    return nextDocuments;
+  }
+
+  async function checkDocumentStatus() {
+    setCheckingStatus(true);
+    setNotice(null);
+    try {
+      const nextDocuments = await refreshLibrary();
+      setConnected(true);
+      if (!nextDocuments.length) {
+        setNotice("No documents have been uploaded yet.");
+        return;
+      }
+      const failed = nextDocuments.filter(
+        (document) => document.index_status === "needs_reindex",
+      );
+      const inProgress = nextDocuments.filter(
+        (document) => ["pending", "indexing"].includes(document.index_status),
+      );
+      const disabled = nextDocuments.filter(
+        (document) => document.index_status === "disabled",
+      );
+      if (failed.length) {
+        setNotice(`${nextDocuments.length} document${nextDocuments.length === 1 ? " is" : "s are"} uploaded; ${failed.length} need${failed.length === 1 ? "s" : ""} embeddings reindexed. ${failed[0].index_error ?? ""}`.trim());
+      } else if (inProgress.length) {
+        setNotice(`${nextDocuments.length} document${nextDocuments.length === 1 ? " is" : "s are"} uploaded; embeddings are still pending for ${inProgress.length}.`);
+      } else if (disabled.length) {
+        setNotice(`${nextDocuments.length} document${nextDocuments.length === 1 ? " is" : "s are"} uploaded, but embedding indexing is disabled.`);
+      } else {
+        setNotice(`All ${nextDocuments.length} document${nextDocuments.length === 1 ? " is" : "s are"} uploaded and embeddings are ready.`);
+      }
+    } catch (error) {
+      setConnected(false);
+      setNotice(error instanceof Error ? error.message : "Document status could not be checked.");
+    } finally {
+      setCheckingStatus(false);
+    }
   }
 
   useEffect(() => {
@@ -160,11 +212,18 @@ export default function Home() {
     form.append("file", file);
     try {
       const uploaded = await api<DocumentRecord>("/api/documents", { method: "POST", body: form });
-      await refreshLibrary();
+      const nextDocuments = await refreshLibrary();
       setSelectedDocument(uploaded.id);
       setSelectedPerson(null);
       setConnected(true);
-      setNotice(`${uploaded.filename} is indexed and ready to ask about.`);
+      const indexed = nextDocuments.find((document) => document.id === uploaded.id) ?? uploaded;
+      setNotice(
+        indexed.index_status === "ready"
+          ? `${uploaded.filename} is uploaded and its embeddings are ready.`
+          : indexed.index_status === "disabled"
+            ? `${uploaded.filename} is uploaded. Embedding indexing is disabled.`
+            : indexed.index_error || `${uploaded.filename} is uploaded; its index status is ${indexed.index_status}.`,
+      );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "The document could not be uploaded.");
     } finally {
@@ -288,7 +347,17 @@ export default function Home() {
 
         <div className="section-heading">
           <span>Library</span>
-          <span>{documents.length}</span>
+          <div className="section-actions">
+            <span>{documents.length}</span>
+            <button
+              className="status-check-button"
+              type="button"
+              onClick={() => void checkDocumentStatus()}
+              disabled={loading || uploading || checkingStatus}
+            >
+              {checkingStatus ? "Checking…" : "Check status"}
+            </button>
+          </div>
         </div>
 
         <nav className="document-list" aria-label="Document scope">
@@ -339,6 +408,10 @@ export default function Home() {
                     <span>{humanSize(document.size_bytes)}</span>
                     <span>{document.people.length} {document.people.length === 1 ? "person" : "people"}</span>
                   </small>
+                  <small className={`document-index-status is-${document.index_status}`}>
+                    <span aria-hidden="true" />
+                    {indexStatusLabel(document.index_status)}
+                  </small>
                 </span>
               </button>
               <button
@@ -374,7 +447,15 @@ export default function Home() {
           </div>
           <div className={`connection-pill ${connected ? "is-online" : ""}`}>
             <span />
-            {loading ? "Connecting" : connected ? "Private index ready" : "API offline"}
+            {loading
+              ? "Connecting"
+              : !connected
+                ? "API offline"
+                : hasIndexFailures
+                  ? "Index needs attention"
+                  : allIndexesReady
+                    ? "Private index ready"
+                    : "API connected"}
           </div>
         </header>
 

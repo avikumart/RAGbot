@@ -136,7 +136,7 @@ def create_app(
                     document_id,
                     exc,
                 )
-            return result
+            return store.get_document(document_id) or result
         except Exception:
             stored_path.unlink(missing_ok=True)
             raise
