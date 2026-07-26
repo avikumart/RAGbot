@@ -119,9 +119,11 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .document-index-status > span { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: #b4ada2; }
 .document-index-status.is-ready { color: #397257 !important; }
 .document-index-status.is-ready > span { background: #438b68; box-shadow: 0 0 0 2px #dcede4; }
-.document-index-status.is-indexing > span, .document-index-status.is-pending > span { background: #c2844e; }
-.document-index-status.is-needs_reindex { color: #9a4b35 !important; }
-.document-index-status.is-needs_reindex > span { background: #b75a40; }
+.document-index-status.is-indexing > span { background: #c2844e; }
+.document-index-status.is-lexical { color: #6f6658 !important; }
+.document-index-status.is-lexical > span { background: #958873; }
+.document-index-status.is-repair { color: #9a4b35 !important; }
+.document-index-status.is-repair > span { background: #b75a40; }
 .document-state { display: flex; min-height: 86px; align-items: center; justify-content: center; gap: 8px; padding: 14px; border: 1px dashed #cdc7ba; border-radius: 12px; color: var(--muted); font-family: Georgia, serif; font-size: 10px; line-height: 1.45; text-align: center; }
 .document-state.is-indexing { border-color: #d8b29d; background: #fff8f2; color: #805239; }
 .state-spinner { display: inline-block; width: 13px; height: 13px; flex: 0 0 auto; border: 2px solid #d6d1c7; border-top-color: var(--forest); border-radius: 50%; animation: spin .8s linear infinite; }

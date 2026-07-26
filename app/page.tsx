@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
+import { DocumentIndexStatus } from "./document-index-status.mjs";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -59,14 +60,6 @@ function answerModeLabel(mode: string) {
   if (mode === "local-grounded") return "Local grounded synthesis";
   if (mode.startsWith("cerebras:")) return `Cerebras · ${mode.slice("cerebras:".length)}`;
   return mode;
-}
-
-function indexStatusLabel(status: string) {
-  if (status === "ready") return "Embeddings ready";
-  if (status === "indexing") return "Generating embeddings";
-  if (status === "needs_reindex") return "Index needs attention";
-  if (status === "disabled") return "Embeddings disabled";
-  return "Index pending";
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -219,10 +212,12 @@ export default function Home() {
       const indexed = nextDocuments.find((document) => document.id === uploaded.id) ?? uploaded;
       setNotice(
         indexed.index_status === "ready"
-          ? `${uploaded.filename} is uploaded and its embeddings are ready.`
+          ? `${uploaded.filename} is uploaded and ready.`
           : indexed.index_status === "disabled"
-            ? `${uploaded.filename} is uploaded. Embedding indexing is disabled.`
-            : indexed.index_error || `${uploaded.filename} is uploaded; its index status is ${indexed.index_status}.`,
+            ? `${uploaded.filename} is uploaded in lexical-only mode. You can chat with it now.`
+            : indexed.index_status === "needs_reindex"
+              ? `${uploaded.filename} is uploaded in lexical-only mode, but its semantic index needs repair. You can still chat with it now.`
+              : `${uploaded.filename} is uploaded and indexing.`,
       );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "The document could not be uploaded.");
@@ -408,10 +403,7 @@ export default function Home() {
                     <span>{humanSize(document.size_bytes)}</span>
                     <span>{document.people.length} {document.people.length === 1 ? "person" : "people"}</span>
                   </small>
-                  <small className={`document-index-status is-${document.index_status}`}>
-                    <span aria-hidden="true" />
-                    {indexStatusLabel(document.index_status)}
-                  </small>
+                  <DocumentIndexStatus status={document.index_status} />
                 </span>
               </button>
               <button
