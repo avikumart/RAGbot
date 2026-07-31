@@ -104,11 +104,13 @@ The API and unit tests cover document persistence, vector payloads and IDs, hybr
 
 Pull requests run `.github/workflows/ci.yml`, which performs three independent checks:
 
-- FastAPI endpoint and mocked Cerebras request-contract tests
+- FastAPI endpoint, mocked vector retrieval/indexing, and mocked Cerebras request-contract tests
 - SQLite schema, foreign-key, persistence, and cascade-delete tests
 - Frontend lint, build, and server-rendering tests
 
-The Cerebras tests are network-isolated and never require an API key or consume API credits.
+The vector tests use fake vector stores and embedding providers, so they do not require a
+Qdrant service or download an embedding model. The Cerebras tests are network-isolated and
+never require an API key or consume API credits.
 
 ## Architecture
 
