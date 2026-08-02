@@ -1,7 +1,10 @@
 "use client";
 
 import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
-import { DocumentIndexStatus } from "./document-index-status.mjs";
+import {
+  DocumentIndexStatus,
+  documentIndexStatus,
+} from "./document-index-status.mjs";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -107,7 +110,9 @@ export default function Home() {
 
   const scopedDocument = documents.find((document) => document.id === selectedDocument);
   const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
-  const hasIndexFailures = documents.some((document) => document.index_status === "needs_reindex");
+  const hasIndexFailures = documents.some(
+    (document) => documentIndexStatus(document.index_status).tone === "repair",
+  );
   const allIndexesReady = documents.length > 0
     && documents.every((document) => document.index_status === "ready");
   const visiblePeople = selectedDocument === "all"
@@ -135,13 +140,13 @@ export default function Home() {
         return;
       }
       const failed = nextDocuments.filter(
-        (document) => document.index_status === "needs_reindex",
+        (document) => documentIndexStatus(document.index_status).tone === "repair",
       );
       const inProgress = nextDocuments.filter(
-        (document) => ["pending", "indexing"].includes(document.index_status),
+        (document) => documentIndexStatus(document.index_status).tone === "indexing",
       );
       const disabled = nextDocuments.filter(
-        (document) => document.index_status === "disabled",
+        (document) => documentIndexStatus(document.index_status).tone === "lexical",
       );
       if (failed.length) {
         setNotice(`${nextDocuments.length} document${nextDocuments.length === 1 ? " is" : "s are"} uploaded; ${failed.length} need${failed.length === 1 ? "s" : ""} embeddings reindexed. ${failed[0].index_error ?? ""}`.trim());
@@ -210,12 +215,13 @@ export default function Home() {
       setSelectedPerson(null);
       setConnected(true);
       const indexed = nextDocuments.find((document) => document.id === uploaded.id) ?? uploaded;
+      const indexPresentation = documentIndexStatus(indexed.index_status);
       setNotice(
-        indexed.index_status === "ready"
+        indexPresentation.tone === "ready"
           ? `${uploaded.filename} is uploaded and ready.`
-          : indexed.index_status === "disabled"
+          : indexPresentation.tone === "lexical"
             ? `${uploaded.filename} is uploaded in lexical-only mode. You can chat with it now.`
-            : indexed.index_status === "needs_reindex"
+            : indexPresentation.tone === "repair"
               ? `${uploaded.filename} is uploaded in lexical-only mode, but its semantic index needs repair. You can still chat with it now.`
               : `${uploaded.filename} is uploaded and indexing.`,
       );

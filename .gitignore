@@ -11,3 +11,5 @@ __pycache__/
 personagraph-data/
 .DS_Store
 .vinext/
+playwright-report/
+test-results/

@@ -94,9 +94,11 @@ When running the backend outside Docker, export the same variables in the shell 
 
 ## Test cases
 
-Run the frontend server-render test, backend API tests, and Compose validation in containers:
+Install Chromium once, then run the frontend render and browser tests, backend API tests,
+and Compose validation in containers:
 
 ```bash
+npx playwright install chromium
 ./scripts/local_checks.sh
 ```
 
@@ -106,7 +108,7 @@ Pull requests run `.github/workflows/ci.yml`, which performs three independent c
 
 - FastAPI endpoint, mocked vector retrieval/indexing, and mocked Cerebras request-contract tests
 - SQLite schema, foreign-key, persistence, and cascade-delete tests
-- Frontend lint, build, and server-rendering tests
+- Frontend lint, build, server-rendering tests, and a browser-level degraded-index workflow
 
 The vector tests use fake vector stores and embedding providers, so they do not require a
 Qdrant service or download an embedding model. The Cerebras tests are network-isolated and

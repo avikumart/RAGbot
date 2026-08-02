@@ -172,31 +172,33 @@ class FakeApiVectors:
 
 
 class FailingApiVectors(FakeApiVectors):
-    def __init__(self):
-        super().__init__()
-        self.store = None
-
     def index_document(self, document_id):
-        self.store.set_vector_status(
-            document_id,
-            "needs_reindex",
-            "test/model",
-            "Private host qdrant.internal rejected token=secret-value",
-        )
         raise RuntimeError("Private host qdrant.internal rejected token=secret-value")
 
+    def search(self, question, document_ids, limit):
+        raise RuntimeError("Vector search is unavailable")
 
-def test_documents_endpoint_exposes_safe_failed_index_status(tmp_path, monkeypatch):
+
+def test_degraded_upload_reports_repair_and_keeps_lexical_chat_available(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("VECTOR_SEARCH_ENABLED", "true")
     vectors = FailingApiVectors()
     app = create_app(tmp_path, vector_service=vectors)
-    vectors.store = app.state.store
     with TestClient(app) as client:
         upload = client.post(
             "/api/documents",
             files={"file": ("failed.txt", SAMPLE, "text/plain")},
         )
         assert upload.status_code == 201
+        uploaded = upload.json()
+        assert uploaded["index_status"] == "needs_reindex"
+        assert uploaded["index_status"] != "ready"
+        assert uploaded["index_error"] == (
+            "Document embeddings could not be generated. Retry indexing and check the status again."
+        )
+        assert "qdrant.internal" not in upload.text
+        assert "secret-value" not in upload.text
 
         response = client.get("/api/documents")
         assert response.status_code == 200
@@ -208,6 +210,19 @@ def test_documents_endpoint_exposes_safe_failed_index_status(tmp_path, monkeypat
         assert document["index_updated_at"] is not None
         assert "qdrant.internal" not in response.text
         assert "secret-value" not in response.text
+
+        chat = client.post(
+            "/api/chat",
+            json={
+                "message": "What does Jordan Lee own?",
+                "document_ids": [uploaded["id"]],
+            },
+        )
+        assert chat.status_code == 200
+        payload = chat.json()
+        assert payload["retrieval_mode"] == "lexical-fallback"
+        assert payload["sources"][0]["filename"] == "failed.txt"
+        assert "rollout plan" in payload["answer"]
 
 
 def test_upload_semantic_retrieval_and_delete_use_vector_layer(tmp_path, monkeypatch):
