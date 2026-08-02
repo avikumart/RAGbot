@@ -46,3 +46,13 @@ test("renders the four document indexing states accurately", () => {
     if (status === "needs_reindex") assert.doesNotMatch(html, />Ready<\/small>/);
   }
 });
+
+test("renders an unknown degraded state as needing repair, never ready", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(DocumentIndexStatus, { status: "degraded" }),
+  );
+
+  assert.match(html, /data-index-status="repair"/);
+  assert.match(html, />Needs repair<\/small>/);
+  assert.doesNotMatch(html, />Ready<\/small>/);
+});

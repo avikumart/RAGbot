@@ -131,6 +131,12 @@ def create_app(
             except Exception as exc:
                 # SQLite is authoritative. The retained document remains searchable
                 # lexically and is repairable through the backfill command.
+                store.set_vector_status(
+                    document_id,
+                    "needs_reindex",
+                    settings.embedding_model,
+                    str(exc)[:500],
+                )
                 logger.warning(
                     "Document retained but requires vector reindex document_id=%s reason=%s",
                     document_id,
