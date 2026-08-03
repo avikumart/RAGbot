@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .extraction import Chunk
+from .migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
 
 
 DEFAULT_INDEX_STATUS = "pending"
@@ -30,44 +31,37 @@ class Store:
     def initialize(self) -> None:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS documents (
-                    id TEXT PRIMARY KEY,
-                    filename TEXT NOT NULL,
-                    content_type TEXT NOT NULL,
-                    stored_path TEXT NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    uploaded_at TEXT NOT NULL,
-                    chunk_count INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS chunks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                    ordinal INTEGER NOT NULL,
-                    page INTEGER,
-                    content TEXT NOT NULL,
-                    people_json TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS chunks_document_idx ON chunks(document_id);
-                CREATE TABLE IF NOT EXISTS people (
-                    document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-                    name TEXT NOT NULL,
-                    normalized TEXT NOT NULL,
-                    mentions INTEGER NOT NULL,
-                    PRIMARY KEY (document_id, normalized)
-                );
-                CREATE INDEX IF NOT EXISTS people_normalized_idx ON people(normalized);
-                CREATE TABLE IF NOT EXISTS vector_index_state (
-                    document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
-                    status TEXT NOT NULL,
-                    embedding_model TEXT,
-                    error TEXT,
-                    updated_at TEXT NOT NULL
-                );
-                """
-            )
+            self._migrate(connection)
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        # The write lock is acquired before reading user_version so concurrent
+        # startup cannot apply the same non-idempotent future migration twice.
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            current_version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if current_version > LATEST_SCHEMA_VERSION:
+                raise RuntimeError(
+                    "Database schema version "
+                    f"{current_version} is newer than supported version "
+                    f"{LATEST_SCHEMA_VERSION}."
+                )
+
+            for target_version, statements in MIGRATIONS:
+                if target_version <= current_version:
+                    continue
+                if target_version != current_version + 1:
+                    raise RuntimeError(
+                        f"Missing database migration after version {current_version}."
+                    )
+                for statement in statements:
+                    connection.execute(statement)
+                connection.execute(f"PRAGMA user_version = {target_version}")
+                current_version = target_version
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
     def add_document(
         self,

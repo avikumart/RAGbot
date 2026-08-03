@@ -102,7 +102,7 @@ npx playwright install chromium
 ./scripts/local_checks.sh
 ```
 
-The API and unit tests cover document persistence, vector payloads and IDs, hybrid fusion, person and document scoping, cited semantic retrieval, lexical fallback, deletion, idempotent backfill, orphan cleanup, empty-library behavior, and unsupported files.
+The API and unit tests cover empty and legacy SQLite database upgrades, idempotent schema migrations, document persistence, vector payloads and IDs, hybrid fusion, person and document scoping, cited semantic retrieval, lexical fallback, deletion, idempotent backfill, orphan cleanup, empty-library behavior, and unsupported files. SQLite schema changes are ordered migrations tracked by `PRAGMA user_version`; migration 001 owns the initial schema, and later schema changes must append a new migration.
 
 Pull requests run `.github/workflows/ci.yml`, which performs three independent checks:
 
