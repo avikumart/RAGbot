@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
+npm run lint
 npm test
 npm run test:e2e
 docker build --target test -t personagraph-api-test ./backend
