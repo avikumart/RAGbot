@@ -1,9 +1,10 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from app.extraction import Chunk
-from app.migrations import LATEST_SCHEMA_VERSION
+from app.migrations import LATEST_SCHEMA_VERSION, MIGRATION_001_INITIAL_SCHEMA
 from app.store import Store
 
 
@@ -47,7 +48,7 @@ def schema_objects(connection):
     ).fetchall()
 
 
-def test_opening_empty_database_runs_migration_001_and_enforces_foreign_keys(tmp_path):
+def test_opening_empty_database_runs_all_migrations_and_enforces_foreign_keys(tmp_path):
     store = Store(tmp_path)
     store.initialize()
 
@@ -58,7 +59,13 @@ def test_opening_empty_database_runs_migration_001_and_enforces_foreign_keys(tmp
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        assert {"documents", "chunks", "people", "vector_index_state"} <= tables
+        assert {
+            "documents",
+            "chunks",
+            "people",
+            "vector_index_state",
+            "pending_file_cleanup",
+        } <= tables
         assert connection.execute("PRAGMA user_version").fetchone()[0] == (
             LATEST_SCHEMA_VERSION
         )
@@ -93,6 +100,32 @@ def test_migration_is_idempotent(tmp_path):
         assert connection.execute(
             "SELECT filename FROM documents WHERE id = 'existing'"
         ).fetchone()[0] == "existing.txt"
+
+
+def test_opening_version_1_database_adds_cleanup_queue_and_preserves_data(tmp_path):
+    database_path = tmp_path / "personagraph.db"
+    with sqlite3.connect(database_path) as connection:
+        for statement in MIGRATION_001_INITIAL_SCHEMA:
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            """INSERT INTO documents
+            (id, filename, content_type, stored_path, sha256, size_bytes, uploaded_at, chunk_count)
+            VALUES ('version-1', 'version-1.txt', 'text/plain', '/tmp/version-1.txt',
+                    'digest', 9, '2026-08-01T00:00:00Z', 0)"""
+        )
+
+    store = Store(tmp_path)
+    store.initialize()
+
+    assert store.get_document("version-1")["filename"] == "version-1.txt"
+    with store.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            LATEST_SCHEMA_VERSION
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pending_file_cleanup"
+        ).fetchone()[0] == 0
 
 
 def test_opening_pre_existing_unversioned_database_preserves_data(tmp_path):
@@ -185,6 +218,70 @@ def test_database_persists_documents_and_cascades_deletes(tmp_path):
         assert connection.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM chunks").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM people").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pending_file_cleanup"
+        ).fetchone()[0] == 0
+
+
+def test_unlink_failure_keeps_pending_cleanup_and_startup_retries_it(
+    tmp_path, monkeypatch, caplog
+):
+    store = Store(tmp_path)
+    store.initialize()
+    stored_path = store.upload_dir / "locked.txt"
+    stored_path.write_text("This file is temporarily locked.")
+    store.add_document(
+        document_id="locked-document",
+        filename="locked.txt",
+        content_type="text/plain",
+        stored_path=stored_path,
+        digest="locked-digest",
+        size_bytes=32,
+        chunks=[
+            Chunk(
+                ordinal=0,
+                page=None,
+                content="This file is temporarily locked.",
+                people=(),
+            )
+        ],
+        people={},
+    )
+
+    original_unlink = Path.unlink
+
+    def fail_unlink(path, missing_ok=False):
+        assert path == stored_path
+        assert missing_ok is True
+        raise PermissionError("simulated file lock")
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    assert store.delete_document("locked-document") is True
+    assert store.get_document("locked-document") is None
+    assert store.get_chunks(["locked-document"]) == []
+    assert stored_path.exists()
+    with store.connect() as connection:
+        cleanup = connection.execute(
+            """SELECT document_id, stored_path, attempt_count,
+            last_attempt_at, last_error FROM pending_file_cleanup"""
+        ).fetchone()
+    assert cleanup["document_id"] == "locked-document"
+    assert cleanup["stored_path"] == str(stored_path)
+    assert cleanup["attempt_count"] == 1
+    assert cleanup["last_attempt_at"] is not None
+    assert cleanup["last_error"] == "simulated file lock"
+    assert "pending cleanup retained" in caplog.text
+
+    monkeypatch.setattr(Path, "unlink", original_unlink)
+    reopened = Store(tmp_path)
+    reopened.initialize()
+
+    assert not stored_path.exists()
+    with reopened.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pending_file_cleanup"
+        ).fetchone()[0] == 0
 
 
 def test_document_index_status_is_returned_without_internal_error_details(tmp_path):

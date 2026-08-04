@@ -42,7 +42,20 @@ MIGRATION_001_INITIAL_SCHEMA = (
 )
 
 
+MIGRATION_002_PENDING_FILE_CLEANUP = (
+    """CREATE TABLE pending_file_cleanup (
+        stored_path TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL,
+        queued_at TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        last_error TEXT
+    )""",
+)
+
+
 MIGRATIONS = (
     (1, MIGRATION_001_INITIAL_SCHEMA),
+    (2, MIGRATION_002_PENDING_FILE_CLEANUP),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -256,3 +258,54 @@ def test_upload_semantic_retrieval_and_delete_use_vector_layer(tmp_path, monkeyp
         deletion = client.delete(f"/api/documents/{document_id}")
         assert deletion.status_code == 200
         assert vectors.deleted == [document_id]
+
+
+def test_delete_succeeds_and_records_cleanup_when_unlink_fails(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setenv("VECTOR_SEARCH_ENABLED", "true")
+    vectors = FakeApiVectors()
+    app = create_app(tmp_path, vector_service=vectors)
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents",
+            files={
+                "file": (
+                    "locked.txt",
+                    b"Jordan owns the locked rollout plan.",
+                    "text/plain",
+                )
+            },
+        )
+        assert upload.status_code == 201
+        document_id = upload.json()["id"]
+        with app.state.store.connect() as connection:
+            stored_path = Path(
+                connection.execute(
+                    "SELECT stored_path FROM documents WHERE id = ?", (document_id,)
+                ).fetchone()["stored_path"]
+            )
+
+        def fail_unlink(path, missing_ok=False):
+            assert path == stored_path
+            assert missing_ok is True
+            raise PermissionError("simulated API unlink failure")
+
+        monkeypatch.setattr(Path, "unlink", fail_unlink)
+        deletion = client.delete(f"/api/documents/{document_id}")
+
+        assert deletion.status_code == 200
+        assert deletion.json() == {"deleted": True}
+        assert vectors.deleted == [document_id]
+        assert app.state.store.get_document(document_id) is None
+        assert stored_path.exists()
+        with app.state.store.connect() as connection:
+            cleanup = connection.execute(
+                """SELECT document_id, attempt_count, last_error
+                FROM pending_file_cleanup WHERE stored_path = ?""",
+                (str(stored_path),),
+            ).fetchone()
+        assert cleanup["document_id"] == document_id
+        assert cleanup["attempt_count"] == 1
+        assert cleanup["last_error"] == "simulated API unlink failure"
+        assert "pending cleanup retained" in caplog.text
