@@ -1,41 +1,16 @@
 "use client";
 
-import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from "react";
-import {
-  DocumentIndexStatus,
-  documentIndexStatus,
-} from "./document-index-status.mjs";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-
-type DocumentRecord = {
-  id: string;
-  filename: string;
-  content_type: string;
-  size_bytes: number;
-  uploaded_at: string;
-  chunk_count: number;
-  people: string[];
-  index_status: string;
-  index_error: string | null;
-  index_updated_at: string | null;
-};
-
-type PersonRecord = {
-  normalized: string;
-  name: string;
-  mentions: number;
-  document_count: number;
-};
-
-type Source = {
-  index: number;
-  document_id: string;
-  filename: string;
-  page: number | null;
-  excerpt: string;
-  score: number;
-};
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { DocumentLibrary } from "@/components/document-library";
+import { api } from "@/lib/api";
+import type {
+  ChatRequest,
+  ChatResponse,
+  DocumentRecord,
+  PersonRecord,
+  Source,
+} from "@/lib/api";
+import { documentIndexStatus } from "./document-index-status.mjs";
 
 type Message = {
   id: string;
@@ -45,16 +20,6 @@ type Message = {
   mode?: string;
 };
 
-function humanSize(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function documentKind(filename: string) {
-  return filename.split(".").pop()?.toUpperCase() || "DOC";
-}
-
 function citationLabel(source: Source) {
   return source.page ? `${source.filename} · p. ${source.page}` : source.filename;
 }
@@ -63,16 +28,6 @@ function answerModeLabel(mode: string) {
   if (mode === "local-grounded") return "Local grounded synthesis";
   if (mode.startsWith("cerebras:")) return `Cerebras · ${mode.slice("cerebras:".length)}`;
   return mode;
-}
-
-async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, options);
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.detail || "Something went wrong. Please try again.");
-  }
-  if (response.status === 204) return undefined as T;
-  return response.json();
 }
 
 function AnswerText({ text }: { text: string }) {
@@ -104,7 +59,6 @@ export default function Home() {
   const [uploading, setUploading] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [thinking, setThinking] = useState(false);
-  const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
 
@@ -233,18 +187,6 @@ export default function Home() {
     }
   }
 
-  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (file) void uploadDocument(file);
-  }
-
-  function onDrop(event: DragEvent<HTMLDivElement>) {
-    event.preventDefault();
-    setDragging(false);
-    const file = event.dataTransfer.files?.[0];
-    if (file) void uploadDocument(file);
-  }
-
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
     const message = question.trim();
@@ -258,14 +200,15 @@ export default function Home() {
     setThinking(true);
     setNotice(null);
     try {
-      const response = await api<{ answer: string; sources: Source[]; mode: string }>("/api/chat", {
+      const request: ChatRequest = {
+        message,
+        document_ids: selectedDocument === "all" ? undefined : [selectedDocument],
+        person: selectedPerson || undefined,
+      };
+      const response = await api<ChatResponse>("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          message,
-          document_ids: selectedDocument === "all" ? undefined : [selectedDocument],
-          person: selectedPerson || undefined,
-        }),
+        body: JSON.stringify(request),
       });
       setMessages((current) => [
         ...current,
@@ -296,6 +239,16 @@ export default function Home() {
     }
   }
 
+  function selectDocument(document: DocumentRecord | "all") {
+    if (document === "all") {
+      setSelectedDocument("all");
+      return;
+    }
+
+    setSelectedDocument(document.id);
+    if (selectedPerson && !document.people.includes(selectedPerson)) setSelectedPerson(null);
+  }
+
   function choosePerson(name: string) {
     setSelectedPerson((current) => current === name ? null : name);
     if (!question) setQuestion(`What should I know about ${name}?`);
@@ -308,134 +261,19 @@ export default function Home() {
 
   return (
     <main className="app-shell">
-      <aside className="library-panel">
-        <div className="brand-row">
-          <span className="brand-mark" aria-hidden="true">P</span>
-          <div>
-            <p className="brand-name">Personagraph</p>
-            <p className="brand-subtitle">Private people intelligence</p>
-          </div>
-        </div>
-
-        <div
-          className={`upload-card ${dragging ? "is-dragging" : ""}`}
-          onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
-          onDragOver={(event) => event.preventDefault()}
-          onDragLeave={() => setDragging(false)}
-          onDrop={onDrop}
-        >
-          <span className="upload-symbol" aria-hidden="true">↑</span>
-          <div>
-            <p>{uploading ? "Indexing your document…" : "Add a document"}</p>
-            <span>PDF, DOCX, TXT or MD · 10 MB max</span>
-          </div>
-          <button
-            className="upload-button"
-            type="button"
-            onClick={() => fileInput.current?.click()}
-            disabled={uploading}
-          >
-            Browse
-          </button>
-          <input
-            ref={fileInput}
-            className="visually-hidden"
-            type="file"
-            accept=".pdf,.docx,.txt,.md"
-            onChange={onFileChange}
-          />
-        </div>
-
-        <div className="section-heading">
-          <span>Library</span>
-          <div className="section-actions">
-            <span>{documents.length}</span>
-            <button
-              className="status-check-button"
-              type="button"
-              onClick={() => void checkDocumentStatus()}
-              disabled={loading || uploading || checkingStatus}
-            >
-              {checkingStatus ? "Checking…" : "Check status"}
-            </button>
-          </div>
-        </div>
-
-        <nav className="document-list" aria-label="Document scope">
-          <button
-            type="button"
-            className={`document-item all-documents ${selectedDocument === "all" ? "is-active" : ""}`}
-            onClick={() => setSelectedDocument("all")}
-            aria-current={selectedDocument === "all" ? "true" : undefined}
-          >
-            <span className="document-icon">◎</span>
-            <span className="document-copy">
-              <strong>All documents</strong>
-              <small>{people.length} people in scope</small>
-            </span>
-          </button>
-          {loading ? (
-            <div className="document-state" role="status">
-              <span className="state-spinner" aria-hidden="true" />
-              <span>Loading your library…</span>
-            </div>
-          ) : uploading ? (
-            <div className="document-state is-indexing" role="status">
-              <span className="state-spinner" aria-hidden="true" />
-              <span>Indexing document…</span>
-            </div>
-          ) : !documents.length ? (
-            <div className="document-state">
-              <span aria-hidden="true">◇</span>
-              <span>Your uploaded documents will appear here.</span>
-            </div>
-          ) : documents.map((document) => (
-            <div className={`document-row ${selectedDocument === document.id ? "is-active" : ""}`} key={document.id}>
-              <button
-                type="button"
-                className="document-item"
-                onClick={() => {
-                  setSelectedDocument(document.id);
-                  if (selectedPerson && !document.people.includes(selectedPerson)) setSelectedPerson(null);
-                }}
-                aria-current={selectedDocument === document.id ? "true" : undefined}
-                title={document.filename}
-              >
-                <span className="file-badge">{documentKind(document.filename)}</span>
-                <span className="document-copy">
-                  <strong title={document.filename}>{document.filename}</strong>
-                  <small className="document-meta">
-                    <span>{documentKind(document.filename)}</span>
-                    <span>{humanSize(document.size_bytes)}</span>
-                    <span>{document.people.length} {document.people.length === 1 ? "person" : "people"}</span>
-                  </small>
-                  <DocumentIndexStatus status={document.index_status} />
-                </span>
-              </button>
-              <button
-                className="remove-button"
-                type="button"
-                aria-label={`Remove ${document.filename}`}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void removeDocument(document);
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </nav>
-
-        <div className="privacy-note">
-          <span className="privacy-dot" aria-hidden="true" />
-          <div>
-            <strong>Local by design</strong>
-            <p>Files stay inside your Docker volume.</p>
-          </div>
-        </div>
-      </aside>
+      <DocumentLibrary
+        documents={documents}
+        peopleCount={people.length}
+        selectedDocument={selectedDocument}
+        loading={loading}
+        uploading={uploading}
+        checkingStatus={checkingStatus}
+        fileInput={fileInput}
+        onUpload={(file) => void uploadDocument(file)}
+        onCheckStatus={() => void checkDocumentStatus()}
+        onSelectDocument={selectDocument}
+        onRemoveDocument={(document) => void removeDocument(document)}
+      />
 
       <section className="chat-panel">
         <header className="chat-header">
