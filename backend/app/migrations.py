@@ -43,7 +43,7 @@ MIGRATION_001_INITIAL_SCHEMA = (
 
 
 MIGRATION_002_PENDING_FILE_CLEANUP = (
-    """CREATE TABLE pending_file_cleanup (
+    """CREATE TABLE IF NOT EXISTS pending_file_cleanup (
         stored_path TEXT PRIMARY KEY,
         document_id TEXT NOT NULL,
         queued_at TEXT NOT NULL,
