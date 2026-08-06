@@ -102,7 +102,7 @@ npx playwright install chromium
 ./scripts/local_checks.sh
 ```
 
-The API and unit tests cover empty and legacy SQLite database upgrades, idempotent schema migrations, document persistence, vector payloads and IDs, hybrid fusion, person and document scoping, cited semantic retrieval, lexical fallback, recoverable file deletion, idempotent backfill, orphan cleanup, empty-library behavior, and unsupported files. SQLite schema changes are ordered migrations tracked by `PRAGMA user_version`; migration 001 owns the initial schema, and later schema changes append a new migration.
+The API and unit tests cover empty and legacy SQLite database upgrades, idempotent schema migrations (including a pre-existing migration 002 cleanup table), document persistence, vector payloads and IDs, hybrid fusion, person and document scoping, cited semantic retrieval, lexical fallback, recoverable file deletion, invalid cleanup-path retirement, idempotent backfill, orphan cleanup, empty-library behavior, and unsupported files. SQLite schema changes are ordered migrations tracked by `PRAGMA user_version`; migration 001 owns the initial schema, and later schema changes append a new migration.
 
 Pull requests run `.github/workflows/ci.yml`, which performs three independent checks:
 
@@ -127,7 +127,7 @@ SQLite is the system of record for documents, stored-file metadata, extracted ch
 
 At query time Personagraph scopes both retrieval paths, identifies people using existing behavior, and combines lexical and vector ranks with deterministic Reciprocal Rank Fusion. Person boosts are applied after fusion. Every Qdrant hit is checked against scoped SQLite rows, and source excerpts, filenames, and pages always come from SQLite. This also prevents stale vectors for deleted documents from reaching an answer.
 
-Deletion is ordered so SQLite remains authoritative and post-commit cleanup is recoverable. A single SQLite transaction first records the stored path in `pending_file_cleanup`, then deletes the document row and its cascading metadata. After the transaction commits, the API best-effort unlinks the uploaded file and removes the cleanup record; an unlink failure is logged, recorded with its attempt details, and still returns a successful document deletion. Pending files are retried during the next startup or deletion. Matching vectors are deleted last. If Qdrant is unavailable, deletion still succeeds; the next backfill/reconciliation removes the vector orphan. Qdrant or filesystem loss cannot make an already-committed deletion appear to have failed.
+Deletion is ordered so SQLite remains authoritative and post-commit cleanup is recoverable. A single SQLite transaction first records the stored path in `pending_file_cleanup`, then deletes the document row and its cascading metadata. After the transaction commits, the API best-effort unlinks the uploaded file and removes the cleanup record; an unlink failure is logged, recorded with its attempt details, and still returns a successful document deletion. Pending managed files are retried during the next startup or deletion. A queued path that does not resolve inside the managed upload directory is never unlinked; it is logged and retired from the queue so an invalid or legacy path cannot create a permanent retry loop. Matching vectors are deleted last. If Qdrant is unavailable, deletion still succeeds; the next backfill/reconciliation removes the vector orphan. Qdrant or filesystem loss cannot make an already-committed deletion appear to have failed.
 
 ## Privacy and limitations
 

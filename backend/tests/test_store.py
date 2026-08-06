@@ -4,7 +4,11 @@ from pathlib import Path
 import pytest
 
 from app.extraction import Chunk
-from app.migrations import LATEST_SCHEMA_VERSION, MIGRATION_001_INITIAL_SCHEMA
+from app.migrations import (
+    LATEST_SCHEMA_VERSION,
+    MIGRATION_001_INITIAL_SCHEMA,
+    MIGRATION_002_PENDING_FILE_CLEANUP,
+)
 from app.store import Store
 
 
@@ -126,6 +130,47 @@ def test_opening_version_1_database_adds_cleanup_queue_and_preserves_data(tmp_pa
         assert connection.execute(
             "SELECT COUNT(*) FROM pending_file_cleanup"
         ).fetchone()[0] == 0
+
+
+def test_opening_version_1_database_with_existing_cleanup_queue_is_safe(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "personagraph.db"
+    queued_path = tmp_path / "uploads" / "already-queued.txt"
+    with sqlite3.connect(database_path) as connection:
+        for statement in MIGRATION_001_INITIAL_SCHEMA:
+            connection.execute(statement)
+        for statement in MIGRATION_002_PENDING_FILE_CLEANUP:
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version = 1")
+        connection.execute(
+            """INSERT INTO pending_file_cleanup
+            (stored_path, document_id, queued_at, attempt_count,
+             last_attempt_at, last_error)
+            VALUES (?, 'already-queued', '2026-08-01T00:00:00Z', 2,
+                    '2026-08-01T00:01:00Z', 'temporary lock')""",
+            (str(queued_path),),
+        )
+
+    store = Store(tmp_path)
+    monkeypatch.setattr(store, "cleanup_pending_files", lambda: (0, 0))
+    store.initialize()
+
+    with store.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            LATEST_SCHEMA_VERSION
+        )
+        cleanup = connection.execute(
+            """SELECT document_id, attempt_count, last_attempt_at, last_error
+            FROM pending_file_cleanup WHERE stored_path = ?""",
+            (str(queued_path),),
+        ).fetchone()
+    assert dict(cleanup) == {
+        "document_id": "already-queued",
+        "attempt_count": 2,
+        "last_attempt_at": "2026-08-01T00:01:00Z",
+        "last_error": "temporary lock",
+    }
 
 
 def test_opening_pre_existing_unversioned_database_preserves_data(tmp_path):
@@ -282,6 +327,37 @@ def test_unlink_failure_keeps_pending_cleanup_and_startup_retries_it(
         assert connection.execute(
             "SELECT COUNT(*) FROM pending_file_cleanup"
         ).fetchone()[0] == 0
+
+
+def test_cleanup_retires_unmanaged_path_without_unlinking_or_retrying(
+    tmp_path, monkeypatch, caplog
+):
+    store = Store(tmp_path)
+    store.initialize()
+    unmanaged_path = tmp_path / "outside-uploads.txt"
+    unmanaged_path.write_text("This file is not managed by the upload directory.")
+    with store.connect() as connection:
+        connection.execute(
+            """INSERT INTO pending_file_cleanup
+            (stored_path, document_id, queued_at)
+            VALUES (?, 'unsafe-path', '2026-08-01T00:00:00Z')""",
+            (str(unmanaged_path),),
+        )
+
+    def unexpected_unlink(path, missing_ok=False):
+        raise AssertionError(f"unmanaged path must not be unlinked: {path}")
+
+    monkeypatch.setattr(Path, "unlink", unexpected_unlink)
+
+    assert store.cleanup_pending_files() == (1, 0)
+    assert store.cleanup_pending_files() == (0, 0)
+    assert unmanaged_path.exists()
+    with store.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM pending_file_cleanup"
+        ).fetchone()[0] == 0
+    assert caplog.text.count("cleanup retired without unlinking") == 1
+    assert "outside the managed upload directory" in caplog.text
 
 
 def test_document_index_status_is_returned_without_internal_error_details(tmp_path):

@@ -300,7 +300,8 @@ class Store:
 
         Successful cleanup, including an already-missing file, removes its queue
         row. Failures are recorded and logged for a later startup or deletion to
-        retry. Paths outside the managed upload directory are never unlinked.
+        retry. Paths outside the managed upload directory are never unlinked;
+        their unsafe queue rows are logged and retired instead of retried.
         """
         paths = list(dict.fromkeys(stored_paths)) if stored_paths is not None else None
         if paths == []:
@@ -324,14 +325,28 @@ class Store:
         for row in rows:
             stored_path = row["stored_path"]
             path = Path(stored_path)
-            error: str | None = None
             if not self._is_managed_upload_path(path):
-                error = "Stored path is outside the managed upload directory."
-            else:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError as exc:
-                    error = str(exc)
+                reason = "Stored path is outside the managed upload directory."
+                with self.connect() as connection:
+                    connection.execute(
+                        "DELETE FROM pending_file_cleanup WHERE stored_path = ?",
+                        (stored_path,),
+                    )
+                completed += 1
+                logger.warning(
+                    "Uploaded-file cleanup retired without unlinking "
+                    "document_id=%s stored_path=%s reason=%s",
+                    row["document_id"],
+                    stored_path,
+                    reason,
+                )
+                continue
+
+            error: str | None = None
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                error = str(exc)
 
             if error is not None:
                 pending += 1
