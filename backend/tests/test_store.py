@@ -69,6 +69,8 @@ def test_opening_empty_database_runs_all_migrations_and_enforces_foreign_keys(tm
             "people",
             "vector_index_state",
             "pending_file_cleanup",
+            "chat_sessions",
+            "chat_messages",
         } <= tables
         assert connection.execute("PRAGMA user_version").fetchone()[0] == (
             LATEST_SCHEMA_VERSION
@@ -130,6 +132,28 @@ def test_opening_version_1_database_adds_cleanup_queue_and_preserves_data(tmp_pa
         assert connection.execute(
             "SELECT COUNT(*) FROM pending_file_cleanup"
         ).fetchone()[0] == 0
+
+
+def test_opening_version_2_database_adds_chat_tables_and_preserves_documents(tmp_path):
+    database_path = tmp_path / "personagraph.db"
+    with sqlite3.connect(database_path) as connection:
+        for statement in MIGRATION_001_INITIAL_SCHEMA + MIGRATION_002_PENDING_FILE_CLEANUP:
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version = 2")
+        connection.execute(
+            """INSERT INTO documents
+            (id, filename, content_type, stored_path, sha256, size_bytes, uploaded_at, chunk_count)
+            VALUES ('version-2', 'version-2.txt', 'text/plain', '/tmp/version-2.txt',
+                    'digest', 9, '2026-08-01T00:00:00Z', 0)"""
+        )
+
+    store = Store(tmp_path)
+    store.initialize()
+
+    assert store.get_document("version-2")["filename"] == "version-2.txt"
+    with store.connect() as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("SELECT COUNT(*) FROM chat_sessions").fetchone()[0] == 0
 
 
 def test_opening_version_1_database_with_existing_cleanup_queue_is_safe(

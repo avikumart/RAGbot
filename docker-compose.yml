@@ -22,6 +22,8 @@ services:
       LEXICAL_CANDIDATE_LIMIT: ${LEXICAL_CANDIDATE_LIMIT:-20}
       VECTOR_TIMEOUT_SECONDS: ${VECTOR_TIMEOUT_SECONDS:-5}
       EMBEDDING_TIMEOUT_SECONDS: ${EMBEDDING_TIMEOUT_SECONDS:-30}
+      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:-}
+      LOCAL_DEVELOPMENT_OWNER: ${LOCAL_DEVELOPMENT_OWNER:-local-development-user}
     ports:
       - "8000:8000"
     volumes:
@@ -54,6 +56,10 @@ services:
         condition: service_healthy
     ports:
       - "3000:3000"
+    environment:
+      PERSONAGRAPH_API_URL: http://api:8000
+      AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:-}
+      LOCAL_DEVELOPMENT_OWNER: ${LOCAL_DEVELOPMENT_OWNER:-local-development-user}
     restart: unless-stopped
 
 volumes:

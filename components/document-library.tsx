@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { DragEvent, RefObject } from "react";
 import { DocumentIndexStatus } from "@/app/document-index-status.mjs";
-import type { DocumentRecord } from "@/lib/api";
+import type { ChatSession, DocumentRecord } from "@/lib/api";
 
 type DocumentLibraryProps = {
   documents: DocumentRecord[];
@@ -17,6 +17,10 @@ type DocumentLibraryProps = {
   onCheckStatus: () => void;
   onSelectDocument: (document: DocumentRecord | "all") => void;
   onRemoveDocument: (document: DocumentRecord) => void;
+  sessions: ChatSession[];
+  activeSessionId: string | null;
+  onNewConversation: () => void;
+  onSelectSession: (sessionId: string) => void;
 };
 
 function humanSize(bytes: number) {
@@ -41,6 +45,10 @@ export function DocumentLibrary({
   onCheckStatus,
   onSelectDocument,
   onRemoveDocument,
+  sessions,
+  activeSessionId,
+  onNewConversation,
+  onSelectSession,
 }: DocumentLibraryProps) {
   const [dragging, setDragging] = useState(false);
 
@@ -170,6 +178,24 @@ export function DocumentLibrary({
             </button>
           </div>
         ))}
+      </nav>
+
+      <div className="conversation-history-heading">
+        <span>Conversations</span>
+        <button type="button" onClick={onNewConversation}>New</button>
+      </div>
+      <nav className="conversation-history" aria-label="Conversation history">
+        {sessions.length ? sessions.map((session) => (
+          <button
+            key={session.id}
+            type="button"
+            className={activeSessionId === session.id ? "is-active" : ""}
+            onClick={() => onSelectSession(session.id)}
+          >
+            <strong>{session.topic}</strong>
+            <small>{new Date(session.updated_at).toLocaleString()}</small>
+          </button>
+        )) : <p>No saved conversations yet.</p>}
       </nav>
 
       <div className="privacy-note">
