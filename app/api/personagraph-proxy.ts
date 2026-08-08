@@ -1,5 +1,6 @@
 import { headers } from "next/headers";
 
+const AUTH_USER_ID_HEADER = "oai-authenticated-user-id";
 const AUTH_EMAIL_HEADER = "oai-authenticated-user-email";
 const API_URL = (
   process.env.PERSONAGRAPH_API_URL
@@ -25,7 +26,11 @@ async function sign(value: string, secret: string) {
 /** Forward only owner-scoped chat APIs after deriving identity server-side. */
 export async function proxyPersonagraph(request: Request, path: string) {
   const requestHeaders = await headers();
-  const identity = requestHeaders.get(AUTH_EMAIL_HEADER)
+  // The authenticated user ID is stable for this Site; email is only a
+  // backwards-compatible fallback for local/proxy environments that do not
+  // provide it.
+  const identity = requestHeaders.get(AUTH_USER_ID_HEADER)
+    ?? requestHeaders.get(AUTH_EMAIL_HEADER)
     ?? process.env.LOCAL_DEVELOPMENT_OWNER
     ?? "local-development-user";
   const owner = await digest(`personagraph-owner:v1:${identity}`);
