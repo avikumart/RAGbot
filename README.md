@@ -129,6 +129,14 @@ At query time Personagraph scopes both retrieval paths, identifies people using 
 
 Deletion is ordered so SQLite remains authoritative and post-commit cleanup is recoverable. A single SQLite transaction first records the stored path in `pending_file_cleanup`, then deletes the document row and its cascading metadata. After the transaction commits, the API best-effort unlinks the uploaded file and removes the cleanup record; an unlink failure is logged, recorded with its attempt details, and still returns a successful document deletion. Pending managed files are retried during the next startup or deletion. A queued path that does not resolve inside the managed upload directory is never unlinked; it is logged and retired from the queue so an invalid or legacy path cannot create a permanent retry loop. Matching vectors are deleted last. If Qdrant is unavailable, deletion still succeeds; the next backfill/reconciliation removes the vector orphan. Qdrant or filesystem loss cannot make an already-committed deletion appear to have failed.
 
+## Conversation persistence and privacy
+
+Conversations are durable, user-scoped records in the same authoritative SQLite database as documents. Each successful turn stores the question, answer, retrieval mode, answer mode, and a snapshot of every citation (including filename, page, excerpt, and score). Deleting or changing a document therefore does not erase the citations shown on a historical answer. Starting a new conversation leaves existing conversations intact; deleting a conversation cascades only to its messages, never to documents.
+
+The web app caches the active conversation ID, composer draft, selected document/person context, and any optimistic or failed messages in versioned browser storage. That cache makes reloads responsive and keeps a failed turn retryable, but the SQLite session is reconciled after load and is always authoritative.
+
+Session and chat requests use a same-origin web proxy. It derives an opaque owner identifier from the authenticated ChatGPT identity and signs it before forwarding to FastAPI; the browser cannot submit a user ID or email to select an owner. Configure a shared, non-empty `AUTH_PROXY_SECRET` in both the `api` and `web` services before exposing the app outside local development. When it is intentionally unset, FastAPI uses the fixed `LOCAL_DEVELOPMENT_OWNER` identity so a local Docker setup remains usable without ChatGPT authentication. Session reads, updates, and deletes for any other owner return `404`.
+
 ## Privacy and limitations
 
 - Uploaded bytes and the SQLite index stay in the local Docker volume.
@@ -137,4 +145,4 @@ Deletion is ordered so SQLite remains authoritative and post-commit cleanup is r
 - An external embedding provider is intentionally not enabled by default. If one is added later, sending chunk text externally must be an explicit configuration choice with the provider's privacy terms reviewed.
 - Name recognition is heuristic and may include organizations or miss uncommon name formats.
 - Text-based PDFs are supported; scanned PDFs need OCR before upload.
-- This is a prototype without user accounts or document-level access control. Do not expose it directly to the public internet.
+- Chat-session ownership is enforced through the signed web proxy. Document-library endpoints remain local-library endpoints rather than per-document access control; do not expose the FastAPI port directly to the public internet.

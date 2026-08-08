@@ -16,8 +16,17 @@ const degradedDocument = {
 
 test("a degraded upload shows Needs repair and remains available to chat", async ({ page }) => {
   let uploaded = false;
+  const session = {
+    id: "session-1",
+    topic: "New conversation",
+    document_ids: [degradedDocument.id],
+    person: null,
+    created_at: "2026-08-01T12:00:00Z",
+    updated_at: "2026-08-01T12:00:00Z",
+  };
+  let savedMessages = [];
 
-  await page.route("http://localhost:8000/api/**", async (route) => {
+  await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
 
@@ -42,9 +51,24 @@ test("a degraded upload shows Needs repair and remains available to chat", async
       });
       return;
     }
+    if (path === "/api/sessions" && request.method() === "GET") {
+      await route.fulfill({ json: { sessions: savedMessages.length ? [session] : [], next_cursor: null } });
+      return;
+    }
+    if (path === "/api/sessions" && request.method() === "POST") {
+      await route.fulfill({ status: 201, json: session });
+      return;
+    }
+    if (path === "/api/sessions/session-1" && request.method() === "GET") {
+      await route.fulfill({ json: { ...session, messages: savedMessages } });
+      return;
+    }
     if (path === "/api/chat") {
-      await route.fulfill({
-        json: {
+      const requestBody = request.postDataJSON();
+      const createdAt = "2026-08-01T12:00:02Z";
+      const response = {
+          session_id: session.id,
+          topic: "What does Jordan Lee own?",
           answer: "Jordan Lee owns the rollout plan [1].",
           mode: "local-grounded",
           retrieval_mode: "lexical-fallback",
@@ -58,8 +82,40 @@ test("a degraded upload shows Needs repair and remains available to chat", async
               score: 1,
             },
           ],
-        },
-      });
+          user_message: {
+            id: "user-message-1",
+            ordinal: 0,
+            role: "user",
+            content: requestBody.message,
+            sources: [],
+            mode: null,
+            retrieval_mode: null,
+            created_at: createdAt,
+          },
+          assistant_message: {
+            id: "assistant-message-1",
+            ordinal: 1,
+            role: "assistant",
+            content: "Jordan Lee owns the rollout plan [1].",
+            sources: [
+              {
+                index: 1,
+                document_id: degradedDocument.id,
+                filename: degradedDocument.filename,
+                page: null,
+                excerpt: "Jordan Lee owns the rollout plan.",
+                score: 1,
+              },
+            ],
+            mode: "local-grounded",
+            retrieval_mode: "lexical-fallback",
+            created_at: createdAt,
+          },
+        };
+      session.topic = response.topic;
+      session.updated_at = createdAt;
+      savedMessages = [response.user_message, response.assistant_message];
+      await route.fulfill({ json: response });
       return;
     }
 
@@ -90,4 +146,12 @@ test("a degraded upload shows Needs repair and remains available to chat", async
     "Jordan Lee owns the rollout plan",
   );
   await expect(page.locator(".message.assistant .source-list")).toContainText("failed.txt");
+
+  await page.reload();
+  await expect(page.locator(".message.assistant .answer-text")).toContainText(
+    "Jordan Lee owns the rollout plan",
+  );
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await expect(page.getByText("PERSON-AWARE RETRIEVAL")).toBeVisible();
+  await expect(page.getByText("What does Jordan Lee own?", { exact: true })).toBeVisible();
 });

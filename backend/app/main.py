@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import re
+from base64 import urlsafe_b64decode, urlsafe_b64encode
+from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -27,6 +30,76 @@ class ChatRequest(BaseModel):
     document_ids: list[str] | None = None
     person: str | None = Field(default=None, max_length=160)
     top_k: int = Field(default=4, ge=1, le=8)
+    session_id: str | None = Field(default=None, min_length=8, max_length=128)
+    client_message_id: str | None = Field(default=None, min_length=8, max_length=128)
+
+
+class CreateSessionRequest(BaseModel):
+    topic: str | None = Field(default=None, max_length=120)
+    document_ids: list[str] | None = None
+    person: str | None = Field(default=None, max_length=160)
+
+
+class UpdateSessionRequest(BaseModel):
+    topic: str | None = Field(default=None, max_length=120)
+    document_ids: list[str] | None = None
+    person: str | None = Field(default=None, max_length=160)
+
+
+def initial_topic(message: str) -> str:
+    normalized = re.sub(r"\s+", " ", message).strip()
+    return normalized[:96].rstrip() or "New conversation"
+
+
+def opaque_owner_id(identity: str) -> str:
+    return hashlib.sha256(f"personagraph-owner:v1:{identity}".encode()).hexdigest()
+
+
+def request_owner(request: Request, settings: Settings) -> str:
+    """Accept an owner only from the signed same-origin proxy.
+
+    A development API with no proxy secret deliberately has one fixed owner,
+    never a browser-provided identity. This keeps local use frictionless while
+    avoiding an arbitrary-user-id API in production.
+    """
+    if not settings.auth_proxy_secret:
+        return opaque_owner_id(settings.local_development_owner)
+
+    owner = request.headers.get("x-personagraph-owner")
+    timestamp = request.headers.get("x-personagraph-owner-timestamp")
+    signature = request.headers.get("x-personagraph-owner-signature")
+    if not owner or not timestamp or not signature:
+        raise HTTPException(status_code=401, detail="Authenticated session required.")
+    try:
+        issued_at = datetime.fromtimestamp(int(timestamp), UTC)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid authenticated session.") from exc
+    if abs((datetime.now(UTC) - issued_at).total_seconds()) > 300:
+        raise HTTPException(status_code=401, detail="Authenticated session expired.")
+    expected = hmac.new(
+        settings.auth_proxy_secret.encode(), f"{owner}:{timestamp}".encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=401, detail="Invalid authenticated session.")
+    return owner
+
+
+def encode_cursor(cursor: tuple[str, str] | None) -> str | None:
+    if not cursor:
+        return None
+    return urlsafe_b64encode(f"{cursor[0]}\n{cursor[1]}".encode()).decode()
+
+
+def decode_cursor(value: str | None) -> tuple[str, str] | None:
+    if not value:
+        return None
+    try:
+        timestamp, session_id = urlsafe_b64decode(value.encode()).decode().split("\n", 1)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid session cursor.") from exc
+    if not timestamp or not session_id:
+        raise HTTPException(status_code=400, detail="Invalid session cursor.")
+    return timestamp, session_id
 
 
 def create_app(
@@ -161,8 +234,78 @@ def create_app(
             )
         return {"deleted": True}
 
+    @app.post("/api/sessions", status_code=201)
+    def create_session(payload: CreateSessionRequest, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
+        return store.create_chat_session(
+            owner_id,
+            topic=(payload.topic or "New conversation").strip() or "New conversation",
+            document_ids=payload.document_ids,
+            person=payload.person,
+        )
+
+    @app.get("/api/sessions")
+    def list_sessions(request: Request, limit: int = 30, cursor: str | None = None) -> dict:
+        owner_id = request_owner(request, settings)
+        if limit < 1 or limit > 100:
+            raise HTTPException(status_code=422, detail="limit must be between 1 and 100.")
+        sessions, next_cursor = store.list_chat_sessions(
+            owner_id, limit, decode_cursor(cursor)
+        )
+        return {"sessions": sessions, "next_cursor": encode_cursor(next_cursor)}
+
+    @app.get("/api/sessions/{session_id}")
+    def get_session(session_id: str, request: Request) -> dict:
+        session = store.get_chat_session(request_owner(request, settings), session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        return session
+
+    @app.patch("/api/sessions/{session_id}")
+    def update_session(session_id: str, payload: UpdateSessionRequest, request: Request) -> dict:
+        fields = payload.model_fields_set
+        if "topic" in fields and not (payload.topic or "").strip():
+            raise HTTPException(status_code=422, detail="A conversation topic is required.")
+        session = store.update_chat_session(
+            request_owner(request, settings),
+            session_id,
+            topic=payload.topic.strip() if payload.topic else None,
+            document_ids=payload.document_ids,
+            person=payload.person,
+            update_topic="topic" in fields,
+            update_document_ids="document_ids" in fields,
+            update_person="person" in fields,
+        )
+        if not session:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        return session
+
+    @app.delete("/api/sessions/{session_id}", status_code=204, response_class=Response)
+    def delete_session(session_id: str, request: Request) -> Response:
+        if not store.delete_chat_session(request_owner(request, settings), session_id):
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        return Response(status_code=204)
+
     @app.post("/api/chat")
-    async def chat(payload: ChatRequest) -> dict:
+    async def chat(payload: ChatRequest, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
+        client_message_id = payload.client_message_id or uuid4().hex
+        if payload.session_id:
+            if not store.get_chat_session(owner_id, payload.session_id):
+                raise HTTPException(status_code=404, detail="Conversation not found.")
+            persisted = store.find_chat_turn(
+                owner_id, payload.session_id, client_message_id
+            )
+            if persisted:
+                assistant = persisted["assistant_message"]
+                return {
+                    "answer": assistant["content"], "sources": assistant["sources"],
+                    "mode": assistant["mode"], "retrieval_mode": assistant["retrieval_mode"],
+                    "session_id": persisted["session"]["id"],
+                    "topic": persisted["session"]["topic"],
+                    "user_message": persisted["user_message"],
+                    "assistant_message": assistant,
+                }
         if not store.list_documents():
             raise HTTPException(status_code=409, detail="Upload a document before asking a question.")
         identified_people, sources, retrieval_mode = hybrid_retrieve(
@@ -182,12 +325,32 @@ def create_app(
             question=payload.message,
             sources=sources,
         )
+        answer = generated or synthesize_answer(payload.message, identified_people, sources)
+        mode = f"cerebras:{settings.cerebras_model}" if generated else "local-grounded"
+        persisted = store.persist_chat_turn(
+            owner_id,
+            session_id=payload.session_id,
+            client_message_id=client_message_id,
+            content=payload.message,
+            document_ids=payload.document_ids,
+            person=payload.person,
+            answer=answer,
+            sources=sources,
+            mode=mode,
+            retrieval_mode=retrieval_mode,
+            topic=initial_topic(payload.message),
+        )
+        if not persisted:
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        assistant = persisted["assistant_message"]
         return {
-            "answer": generated or synthesize_answer(payload.message, identified_people, sources),
-            "people": identified_people,
-            "sources": sources,
-            "mode": f"cerebras:{settings.cerebras_model}" if generated else "local-grounded",
-            "retrieval_mode": retrieval_mode,
+            "answer": assistant["content"], "people": identified_people,
+            "sources": assistant["sources"], "mode": assistant["mode"],
+            "retrieval_mode": assistant["retrieval_mode"],
+            "session_id": persisted["session"]["id"],
+            "topic": persisted["session"]["topic"],
+            "user_message": persisted["user_message"],
+            "assistant_message": assistant,
         }
 
     return app

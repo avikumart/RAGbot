@@ -4,8 +4,10 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { DocumentLibrary } from "@/components/document-library";
 import { api } from "@/lib/api";
 import type {
+  ChatMessage,
   ChatRequest,
   ChatResponse,
+  ChatSession,
   DocumentRecord,
   PersonRecord,
   Source,
@@ -17,8 +19,53 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
-  mode?: string;
+  mode?: string | null;
+  retrievalMode?: string | null;
+  clientMessageId?: string;
+  status?: "pending" | "failed";
 };
+
+type ConversationCache = {
+  version: 1;
+  activeSessionId: string | null;
+  draft: string;
+  selectedDocument: string;
+  selectedPerson: string | null;
+  messages: Message[];
+  updatedAt: string;
+};
+
+const CONVERSATION_CACHE_KEY = "personagraph.conversation-cache.v1";
+
+function readConversationCache(): ConversationCache | null {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(CONVERSATION_CACHE_KEY) ?? "null");
+    if (!parsed || typeof parsed !== "object" || !("version" in parsed) || parsed.version !== 1) {
+      localStorage.removeItem(CONVERSATION_CACHE_KEY);
+      return null;
+    }
+    const cache = parsed as ConversationCache;
+    if (typeof cache.draft !== "string" || !Array.isArray(cache.messages)) {
+      localStorage.removeItem(CONVERSATION_CACHE_KEY);
+      return null;
+    }
+    return cache;
+  } catch {
+    localStorage.removeItem(CONVERSATION_CACHE_KEY);
+    return null;
+  }
+}
+
+function asMessage(message: ChatMessage): Message {
+  return {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    sources: message.sources,
+    mode: message.mode,
+    retrievalMode: message.retrieval_mode,
+  };
+}
 
 function citationLabel(source: Source) {
   return source.page ? `${source.filename} · p. ${source.page}` : source.filename;
@@ -52,6 +99,8 @@ export default function Home() {
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [people, setPeople] = useState<PersonRecord[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<string>("all");
   const [selectedPerson, setSelectedPerson] = useState<string | null>(null);
   const [question, setQuestion] = useState("");
@@ -61,6 +110,7 @@ export default function Home() {
   const [thinking, setThinking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const [cacheHydrated, setCacheHydrated] = useState(false);
 
   const scopedDocument = documents.find((document) => document.id === selectedDocument);
   const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
@@ -120,18 +170,50 @@ export default function Home() {
   }
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const cached = readConversationCache();
+      if (cached) {
+        setActiveSessionId(cached.activeSessionId);
+        setQuestion(cached.draft);
+        setSelectedDocument(cached.selectedDocument);
+        setSelectedPerson(cached.selectedPerson);
+        setMessages(cached.messages);
+      }
+      setCacheHydrated(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!cacheHydrated) return;
     let cancelled = false;
 
     async function initialize() {
       try {
-        const [, nextDocuments, nextPeople] = await Promise.all([
+        const [, nextDocuments, nextPeople, history] = await Promise.all([
           api("/api/health"),
           api<DocumentRecord[]>("/api/documents"),
           api<PersonRecord[]>("/api/people"),
+          api<{ sessions: ChatSession[] }>("/api/sessions?limit=30"),
         ]);
         if (cancelled) return;
         setDocuments(nextDocuments);
         setPeople(nextPeople);
+        setSessions(history.sessions);
+        const cached = readConversationCache();
+        if (cached?.activeSessionId) {
+          try {
+            const session = await api<ChatSession>(`/api/sessions/${cached.activeSessionId}`);
+            if (!cancelled) {
+              setActiveSessionId(session.id);
+              setMessages((session.messages ?? []).map(asMessage));
+              setSelectedDocument(session.document_ids[0] ?? "all");
+              setSelectedPerson(session.person);
+            }
+          } catch {
+            // Cached messages remain useful when offline; the server wins whenever it responds.
+          }
+        }
         setConnected(true);
       } catch (error) {
         if (!cancelled) {
@@ -146,7 +228,25 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [cacheHydrated]);
+
+  useEffect(() => {
+    if (!cacheHydrated) return;
+    const cache: ConversationCache = {
+      version: 1,
+      activeSessionId,
+      draft: question,
+      selectedDocument,
+      selectedPerson,
+      messages,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      localStorage.setItem(CONVERSATION_CACHE_KEY, JSON.stringify(cache));
+    } catch {
+      // Storage quota or privacy settings must never prevent chatting.
+    }
+  }, [activeSessionId, cacheHydrated, messages, question, selectedDocument, selectedPerson]);
 
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -187,23 +287,34 @@ export default function Home() {
     }
   }
 
-  async function sendMessage(event: FormEvent) {
-    event.preventDefault();
-    const message = question.trim();
-    if (!message || thinking || !documents.length) return;
-
-    setMessages((current) => [
-      ...current,
-      { id: crypto.randomUUID(), role: "user", content: message },
-    ]);
-    setQuestion("");
+  async function submitMessage(message: string, clientMessageId = crypto.randomUUID()) {
+    if (thinking || !documents.length) return;
+    const optimistic: Message = { id: clientMessageId, role: "user", content: message, clientMessageId, status: "pending" };
+    setMessages((current) => current.some((item) => item.clientMessageId === clientMessageId)
+      ? current.map((item) => item.clientMessageId === clientMessageId ? { ...item, status: "pending" } : item)
+      : [...current, optimistic]);
     setThinking(true);
     setNotice(null);
     try {
+      let sessionId = activeSessionId;
+      if (!sessionId) {
+        const session = await api<ChatSession>("/api/sessions", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            document_ids: selectedDocument === "all" ? [] : [selectedDocument],
+            person: selectedPerson,
+          }),
+        });
+        sessionId = session.id;
+        setActiveSessionId(session.id);
+        setSessions((current) => [session, ...current]);
+      }
       const request: ChatRequest = {
         message,
         document_ids: selectedDocument === "all" ? undefined : [selectedDocument],
         person: selectedPerson || undefined,
+        session_id: sessionId,
+        client_message_id: clientMessageId,
       };
       const response = await api<ChatResponse>("/api/chat", {
         method: "POST",
@@ -211,19 +322,66 @@ export default function Home() {
         body: JSON.stringify(request),
       });
       setMessages((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content: response.answer,
-          sources: response.sources,
-          mode: response.mode,
-        },
+        ...current.filter((item) => item.clientMessageId !== clientMessageId),
+        asMessage(response.user_message),
+        asMessage(response.assistant_message),
       ]);
+      setActiveSessionId(response.session_id);
+      setSessions((current) => {
+        const next = { id: response.session_id, topic: response.topic, document_ids: request.document_ids ?? [], person: request.person ?? null, created_at: response.user_message.created_at, updated_at: response.assistant_message.created_at };
+        return [next, ...current.filter((session) => session.id !== next.id)];
+      });
     } catch (error) {
+      setMessages((current) => current.map((item) => item.clientMessageId === clientMessageId ? { ...item, status: "failed" } : item));
       setNotice(error instanceof Error ? error.message : "I could not answer that question.");
     } finally {
       setThinking(false);
+    }
+  }
+
+  async function sendMessage(event: FormEvent) {
+    event.preventDefault();
+    const message = question.trim();
+    if (!message || thinking || !documents.length) return;
+    setQuestion("");
+    await submitMessage(message);
+  }
+
+  async function selectSession(sessionId: string) {
+    if (sessionId === activeSessionId || thinking) return;
+    try {
+      const session = await api<ChatSession>(`/api/sessions/${sessionId}`);
+      setActiveSessionId(session.id);
+      setMessages((session.messages ?? []).map(asMessage));
+      setSelectedDocument(session.document_ids[0] ?? "all");
+      setSelectedPerson(session.person);
+      setQuestion("");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "That conversation could not be loaded.");
+    }
+  }
+
+  function newConversation() {
+    if (thinking) return;
+    setActiveSessionId(null);
+    setMessages([]);
+    setQuestion("");
+  }
+
+  async function renameConversation() {
+    if (!activeSessionId || thinking) return;
+    const current = sessions.find((session) => session.id === activeSessionId);
+    const topic = window.prompt("Conversation topic", current?.topic ?? "New conversation")?.trim();
+    if (!topic || topic === current?.topic) return;
+    try {
+      const updated = await api<ChatSession>(`/api/sessions/${activeSessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic }),
+      });
+      setSessions((currentSessions) => [updated, ...currentSessions.filter((session) => session.id !== updated.id)]);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "The conversation could not be renamed.");
     }
   }
 
@@ -273,25 +431,32 @@ export default function Home() {
         onCheckStatus={() => void checkDocumentStatus()}
         onSelectDocument={selectDocument}
         onRemoveDocument={(document) => void removeDocument(document)}
+        sessions={sessions}
+        activeSessionId={activeSessionId}
+        onNewConversation={newConversation}
+        onSelectSession={(sessionId) => void selectSession(sessionId)}
       />
 
       <section className="chat-panel">
         <header className="chat-header">
           <div>
             <span className="eyebrow">Conversation</span>
-            <h1>{scopedDocument?.filename ?? "Your document library"}</h1>
+            <h1>{sessions.find((session) => session.id === activeSessionId)?.topic ?? scopedDocument?.filename ?? "Your document library"}</h1>
           </div>
-          <div className={`connection-pill ${connected ? "is-online" : ""}`}>
-            <span />
-            {loading
-              ? "Connecting"
-              : !connected
-                ? "API offline"
-                : hasIndexFailures
-                  ? "Index needs attention"
-                  : allIndexesReady
-                    ? "Private index ready"
-                    : "API connected"}
+          <div className="chat-header-actions">
+            {activeSessionId && <button className="rename-conversation" type="button" onClick={() => void renameConversation()}>Rename</button>}
+            <div className={`connection-pill ${connected ? "is-online" : ""}`}>
+              <span />
+              {loading
+                ? "Connecting"
+                : !connected
+                  ? "API offline"
+                  : hasIndexFailures
+                    ? "Index needs attention"
+                    : allIndexesReady
+                      ? "Private index ready"
+                      : "API connected"}
+            </div>
           </div>
         </header>
 
@@ -358,6 +523,11 @@ export default function Home() {
                       </div>
                     )}
                     {message.mode && <span className="answer-mode">{answerModeLabel(message.mode)}</span>}
+                    {message.status === "failed" && (
+                      <button className="retry-message" type="button" onClick={() => void submitMessage(message.content, message.clientMessageId ?? message.id)}>
+                        Couldn’t send. Retry
+                      </button>
+                    )}
                   </div>
                 </article>
               ))}

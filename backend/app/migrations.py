@@ -54,8 +54,38 @@ MIGRATION_002_PENDING_FILE_CLEANUP = (
 )
 
 
+MIGRATION_003_CHAT_SESSIONS = (
+    """CREATE TABLE IF NOT EXISTS chat_sessions (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        topic TEXT NOT NULL,
+        document_ids_json TEXT,
+        person TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS chat_messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+        content TEXT NOT NULL,
+        sources_json TEXT,
+        mode TEXT,
+        retrieval_mode TEXT,
+        client_message_id TEXT,
+        created_at TEXT NOT NULL,
+        UNIQUE(session_id, ordinal)
+    )""",
+    "CREATE INDEX IF NOT EXISTS chat_sessions_owner_updated_idx ON chat_sessions(owner_id, updated_at DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS chat_messages_session_ordinal_idx ON chat_messages(session_id, ordinal)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_client_message_idx ON chat_messages(session_id, client_message_id) WHERE client_message_id IS NOT NULL",
+)
+
+
 MIGRATIONS = (
     (1, MIGRATION_001_INITIAL_SCHEMA),
     (2, MIGRATION_002_PENDING_FILE_CLEANUP),
+    (3, MIGRATION_003_CHAT_SESSIONS),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

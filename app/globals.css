@@ -131,6 +131,15 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .remove-button { position: absolute; top: 50%; right: 7px; width: 24px; height: 24px; border: 0; border-radius: 7px; background: transparent; color: #9a968e; cursor: pointer; opacity: 0; transform: translateY(-50%); }
 .document-row:hover .remove-button, .remove-button:focus-visible { opacity: 1; }
 .remove-button:hover { background: #f7dfd5; color: #8d3f25; }
+.conversation-history-heading { display: flex; align-items: center; justify-content: space-between; margin: 18px 6px 8px; color: #696c67; font-size: 10px; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; }
+.conversation-history-heading button { padding: 4px 7px; border: 1px solid #cec8bb; border-radius: 7px; background: rgba(255,255,255,.55); color: var(--forest); cursor: pointer; font-size: 8px; font-weight: 800; letter-spacing: 0; text-transform: none; }
+.conversation-history { display: flex; max-height: 154px; flex-direction: column; gap: 4px; overflow-y: auto; overscroll-behavior: contain; }
+.conversation-history button { width: 100%; padding: 8px 9px; border: 1px solid transparent; border-radius: 9px; background: transparent; cursor: pointer; text-align: left; }
+.conversation-history button:hover { background: rgba(255,255,255,.54); }
+.conversation-history button.is-active { border-color: #d4c5b3; background: var(--white); box-shadow: inset 3px 0 0 var(--copper); }
+.conversation-history strong, .conversation-history small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-history strong { font-family: Georgia, serif; font-size: 11px; }
+.conversation-history small, .conversation-history p { margin: 3px 0 0; color: var(--muted); font-size: 8px; }
 
 .privacy-note { display: flex; gap: 10px; margin: 22px 4px 0; padding-top: 18px; border-top: 1px solid rgba(24,32,29,.09); }
 .privacy-dot { width: 8px; height: 8px; margin-top: 3px; border: 2px solid var(--forest); border-radius: 50%; box-shadow: inset 0 0 0 2px #ebe6dc; background: #83a695; }
@@ -141,6 +150,8 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .chat-header { display: flex; min-height: 92px; align-items: center; justify-content: space-between; gap: 18px; padding: 21px 34px 18px; border-bottom: 1px solid var(--line); }
 .eyebrow { color: #8b8d87; font-size: 9px; font-weight: 800; letter-spacing: .16em; text-transform: uppercase; }
 .chat-header h1 { max-width: 580px; margin: 5px 0 0; overflow: hidden; color: #252b28; font-family: Georgia, serif; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
+.chat-header-actions { display: flex; align-items: center; gap: 8px; }
+.rename-conversation { padding: 6px 8px; border: 1px solid #dedbd2; border-radius: 8px; background: #fffefb; color: var(--forest); cursor: pointer; font-size: 9px; font-weight: 700; }
 .connection-pill { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid #dedbd2; border-radius: 999px; color: var(--muted); font-size: 9px; }
 .connection-pill span { width: 6px; height: 6px; border-radius: 50%; background: #b6ada2; }
 .connection-pill.is-online span { background: #438b68; box-shadow: 0 0 0 3px #dcede4; }
@@ -180,6 +191,7 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .source-number { display: grid; width: 20px; height: 20px; place-items: center; border-radius: 6px; background: #e2ebe6; color: var(--forest); font-size: 8px; font-weight: 800; }
 .source-card p { margin: 0; padding: 2px 12px 12px 40px; color: var(--muted); font-family: Georgia, serif; font-size: 10px; line-height: 1.55; }
 .answer-mode { display: inline-block; margin-top: 11px; color: #969a95; font-size: 8px; letter-spacing: .04em; }
+.retry-message { display: block; margin-top: 9px; padding: 5px 7px; border: 1px solid #d9b7a8; border-radius: 7px; background: #fff7f2; color: #9a4b35; cursor: pointer; font-size: 9px; }
 .thinking-message { align-items: center; }
 .thinking-dots { display: flex; gap: 4px; }
 .thinking-dots span { width: 6px; height: 6px; border-radius: 50%; background: #89988f; animation: pulse 1.15s infinite ease-in-out; }

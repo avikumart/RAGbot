@@ -24,6 +24,8 @@ class Settings:
     lexical_candidate_limit: int
     vector_timeout_seconds: float
     embedding_timeout_seconds: float
+    auth_proxy_secret: str
+    local_development_owner: str
 
     @classmethod
     def from_env(cls, data_dir: Path | None = None) -> "Settings":
@@ -56,4 +58,8 @@ class Settings:
             lexical_candidate_limit=int(os.getenv("LEXICAL_CANDIDATE_LIMIT", "20")),
             vector_timeout_seconds=float(os.getenv("VECTOR_TIMEOUT_SECONDS", "5")),
             embedding_timeout_seconds=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "30")),
+            auth_proxy_secret=os.getenv("AUTH_PROXY_SECRET", "").strip(),
+            local_development_owner=os.getenv(
+                "LOCAL_DEVELOPMENT_OWNER", "local-development-user"
+            ).strip() or "local-development-user",
         )

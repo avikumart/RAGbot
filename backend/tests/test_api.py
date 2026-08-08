@@ -1,8 +1,11 @@
+import hashlib
+import hmac
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.main import create_app
+from app.main import create_app, opaque_owner_id
 from app.vector_store import VectorCandidate
 
 
@@ -26,6 +29,19 @@ def client_with_sample(tmp_path):
     )
     assert response.status_code == 201, response.text
     return client, response.json()
+
+
+def owner_headers(identity: str, secret: str = "test-proxy-secret"):
+    owner = opaque_owner_id(identity)
+    timestamp = str(int(datetime.now(UTC).timestamp()))
+    signature = hmac.new(
+        secret.encode(), f"{owner}:{timestamp}".encode(), hashlib.sha256
+    ).hexdigest()
+    return {
+        "x-personagraph-owner": owner,
+        "x-personagraph-owner-timestamp": timestamp,
+        "x-personagraph-owner-signature": signature,
+    }
 
 
 def test_upload_extracts_people_and_persists_document(tmp_path):
@@ -146,6 +162,85 @@ def test_empty_library_and_unsupported_file_are_clear(tmp_path):
         )
         assert upload.status_code == 422
         assert "Supported formats" in upload.json()["detail"]
+
+
+def test_sessions_are_owned_persistent_and_idempotent(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_PROXY_SECRET", "test-proxy-secret")
+    client, document = client_with_sample(tmp_path)
+    alice, bob = owner_headers("alice@example.com"), owner_headers("bob@example.com")
+    try:
+        created = client.post(
+            "/api/sessions",
+            headers=alice,
+            json={"document_ids": [document["id"]], "person": "Jordan Lee"},
+        )
+        assert created.status_code == 201
+        session = created.json()
+        assert session["topic"] == "New conversation"
+
+        first = client.post(
+            "/api/chat",
+            headers=alice,
+            json={
+                "session_id": session["id"],
+                "client_message_id": "message-0001",
+                "message": "  What does Jordan Lee own?  ",
+                "document_ids": [document["id"]],
+            },
+        )
+        assert first.status_code == 200
+        payload = first.json()
+        assert payload["session_id"] == session["id"]
+        assert payload["topic"] == "What does Jordan Lee own?"
+        assert payload["assistant_message"]["sources"][0]["filename"] == "people-notes.txt"
+        assert payload["assistant_message"]["retrieval_mode"] == "lexical"
+
+        retry = client.post(
+            "/api/chat",
+            headers=alice,
+            json={
+                "session_id": session["id"],
+                "client_message_id": "message-0001",
+                "message": "What does Jordan Lee own?",
+                "document_ids": [document["id"]],
+            },
+        )
+        assert retry.status_code == 200
+        assert retry.json()["assistant_message"]["id"] == payload["assistant_message"]["id"]
+
+        loaded = client.get(f"/api/sessions/{session['id']}", headers=alice)
+        assert [message["role"] for message in loaded.json()["messages"]] == ["user", "assistant"]
+        assert client.get(f"/api/sessions/{session['id']}", headers=bob).status_code == 404
+        assert client.patch(
+            f"/api/sessions/{session['id']}", headers=bob, json={"topic": "Nope"}
+        ).status_code == 404
+        assert client.delete(f"/api/sessions/{session['id']}", headers=bob).status_code == 404
+
+        renamed = client.patch(
+            f"/api/sessions/{session['id']}", headers=alice, json={"topic": "Jordan rollout"}
+        )
+        assert renamed.json()["topic"] == "Jordan rollout"
+        assert client.delete(f"/api/sessions/{session['id']}", headers=alice).status_code == 204
+        with client.app.state.store.connect() as connection:
+            assert connection.execute("SELECT COUNT(*) FROM chat_messages").fetchone()[0] == 0
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_session_listing_is_latest_first_with_deterministic_cursor(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_PROXY_SECRET", "test-proxy-secret")
+    with TestClient(create_app(tmp_path)) as client:
+        headers = owner_headers("alice@example.com")
+        first = client.post("/api/sessions", headers=headers, json={"topic": "First"}).json()
+        second = client.post("/api/sessions", headers=headers, json={"topic": "Second"}).json()
+        client.patch(f"/api/sessions/{first['id']}", headers=headers, json={"topic": "First edited"})
+        page_one = client.get("/api/sessions?limit=1", headers=headers).json()
+        assert page_one["sessions"][0]["id"] == first["id"]
+        assert page_one["next_cursor"]
+        page_two = client.get(
+            f"/api/sessions?limit=1&cursor={page_one['next_cursor']}", headers=headers
+        ).json()
+        assert page_two["sessions"][0]["id"] == second["id"]
 
 
 class FakeApiVectors:
