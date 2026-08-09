@@ -116,10 +116,12 @@ never require an API key or consume API credits.
 
 ## Architecture
 
-- `app/`: responsive React/vinext browser client
+- `frontend/`: responsive React/vinext browser client, its tests, and client-side D1 schema
 - `backend/app/`: FastAPI ingestion, authoritative SQLite storage, local embeddings, Qdrant indexing, hybrid retrieval, and optional Cerebras generation
 - `backend/tests/`: end-to-end API tests using a temporary data directory
 - `docker-compose.yml`: production-shaped web/API/Qdrant stack with separate persistent volumes
+
+See the [documentation index](docs/README.md) for component-specific setup and data-flow references.
 
 SQLite is the system of record for documents, stored-file metadata, extracted chunks, people, and their relationships. Qdrant stores only rebuildable embeddings, content hashes, model identifiers, scoping metadata, and SQLite document/chunk references—never authoritative chunk text. Upload commits SQLite first and then indexes vectors in batches. A failed vector step marks the document for reindex without rolling back SQLite.
 
