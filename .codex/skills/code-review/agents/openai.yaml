@@ -1,0 +1,7 @@
+interface:
+  display_name: "Code Review"
+  short_description: "Review correctness, security, and tests"
+  default_prompt: "Use $code-review to review this repository or diff for actionable findings."
+
+policy:
+  allow_implicit_invocation: true
