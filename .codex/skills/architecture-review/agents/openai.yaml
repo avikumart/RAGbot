@@ -1,0 +1,7 @@
+interface:
+  display_name: "Architecture Review"
+  short_description: "Review boundaries, data flow, and resilience"
+  default_prompt: "Use $architecture-review to review this repository architecture and risks."
+
+policy:
+  allow_implicit_invocation: true
