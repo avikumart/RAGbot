@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 import httpx
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You answer questions about people using only the supplied document excerpts.
@@ -70,6 +75,11 @@ async def generate_with_cerebras(
             f"[{source['index']}] {source['filename']}{page_label}\n{source['excerpt']}"
         )
     context = "\n\n".join(formatted_sources)
+    logger.info(
+        "Requesting a Cerebras completion with model %s and %d retrieved source(s).",
+        model,
+        len(sources),
+    )
     try:
         if client is not None:
             answer = await _request_cerebras_completion(
@@ -94,6 +104,10 @@ async def generate_with_cerebras(
             if not any(f"[{source['index']}]" in answer for source in sources):
                 answer += "\n\n" + " ".join(f"[{source['index']}]" for source in sources[:2])
             return answer
-    except (httpx.HTTPError, TypeError, ValueError):
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        logger.warning(
+            "Cerebras completion failed; falling back to local grounded synthesis: %s",
+            exc,
+        )
         return None
     return None

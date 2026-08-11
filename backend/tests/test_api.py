@@ -127,6 +127,41 @@ def test_chat_uses_cerebras_when_api_key_is_configured(tmp_path, monkeypatch):
         client.__exit__(None, None, None)
 
 
+def test_chat_queries_cerebras_once_for_each_fresh_grounded_question(tmp_path, monkeypatch):
+    monkeypatch.setenv("CEREBRAS_API_KEY", "test-api-key")
+    requests = []
+
+    async def fake_cerebras(**kwargs):
+        requests.append(kwargs)
+        return f"Grounded answer {len(requests)} [1]."
+
+    monkeypatch.setattr("app.main.generate_with_cerebras", fake_cerebras)
+    client, document = client_with_sample(tmp_path)
+    try:
+        for question in (
+            "What does Jordan Lee own?",
+            "What does Maya Patel review?",
+        ):
+            response = client.post(
+                "/api/chat",
+                json={"message": question, "document_ids": [document["id"]]},
+            )
+            assert response.status_code == 200
+            assert response.json()["mode"] == "cerebras:gpt-oss-120b"
+
+        assert [request["question"] for request in requests] == [
+            "What does Jordan Lee own?",
+            "What does Maya Patel review?",
+        ]
+        assert all(request["sources"] for request in requests)
+        assert all(
+            request["sources"][0]["filename"] == "people-notes.txt"
+            for request in requests
+        )
+    finally:
+        client.__exit__(None, None, None)
+
+
 def test_chat_honors_document_scope(tmp_path):
     client, document = client_with_sample(tmp_path)
     try:
