@@ -314,6 +314,29 @@ test.describe("Upload validation", () => {
 });
 
 test.describe("Scoped retrieval and citation integrity", () => {
+  test("shows a no-evidence answer without inventing citations", async ({ page }) => {
+    const notes = documentRecord("notes", "people-notes.txt", ["Jordan Lee"]);
+    const state = createApiState({
+      documents: [notes],
+      people: [personRecord("Jordan Lee")],
+      onChat: ({ request }) => {
+        expect(request.document_ids).toBeUndefined();
+        return {
+          answer: "I could not find grounded evidence about Taylor Morgan in your documents.",
+          sources: [],
+        };
+      },
+    });
+    await openApp(page, state);
+
+    await ask(page, "What does Taylor Morgan do?");
+
+    const assistant = page.locator(".message.assistant").last();
+    await expect(assistant.locator(".answer-text")).toContainText("could not find grounded evidence");
+    await expect(assistant.locator(".inline-citation")).toHaveCount(0);
+    await expect(assistant.locator(".source-card")).toHaveCount(0);
+  });
+
   test("limits a question to the selected document and displays only its source", async ({ page }) => {
     const alpha = documentRecord("alpha", "alpha.txt", ["Jordan Lee"]);
     const beta = documentRecord("beta", "beta.txt", ["Jordan Lee"]);
