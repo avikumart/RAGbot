@@ -248,8 +248,10 @@ test.describe("First document workflow", () => {
 
     await expect(documentButton(page, notes.filename)).toBeVisible();
     await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+    await expect(page.getByText("Subjects in scope", { exact: true })).toBeVisible();
     await expect(personButton(page, "Jordan Lee")).toBeVisible();
     await expect(personButton(page, "Maya Patel")).toBeVisible();
+    await expect(personButton(page, "Jordan Lee")).toContainText("Appears in 1 document · 1 indexed passage");
 
     await personButton(page, "Jordan Lee").click();
     await expect(page.locator(".active-person")).toContainText("Jordan Lee");
