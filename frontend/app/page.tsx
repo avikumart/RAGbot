@@ -71,6 +71,12 @@ function citationLabel(source: Source) {
   return source.page ? `${source.filename} · p. ${source.page}` : source.filename;
 }
 
+function subjectDescription(subject: PersonRecord) {
+  const documentLabel = `${subject.document_count} ${subject.document_count === 1 ? "document" : "documents"}`;
+  const passageLabel = `${subject.mentions} indexed ${subject.mentions === 1 ? "passage" : "passages"}`;
+  return `Appears in ${documentLabel} · ${passageLabel}`;
+}
+
 function answerModeLabel(mode: string) {
   if (mode === "local-grounded") return "Local grounded synthesis";
   if (mode.startsWith("cerebras:")) return `Cerebras · ${mode.slice("cerebras:".length)}`;
@@ -585,15 +591,15 @@ export default function Home() {
           <div className="library-stats" aria-label="Library activity summary">
             <div><strong>{documents.length}</strong><span>documents</span></div>
             <div><strong>{totalChunks}</strong><span>chunks indexed</span></div>
-            <div><strong>{people.length}</strong><span>people found</span></div>
+            <div><strong>{people.length}</strong><span>subjects found</span></div>
           </div>
           {uploading && <p className="indexing-status" role="status"><span className="state-spinner" aria-hidden="true" /> Indexing your upload</p>}
           <div className="people-heading">
-            <span className="eyebrow">People in scope</span>
+            <span className="eyebrow">Subjects in scope</span>
             <span className="people-count">{visiblePeople.length}</span>
           </div>
           {loading ? (
-            <div className="people-empty people-loading" role="status"><span className="state-spinner" aria-hidden="true" /><p>Loading people…</p></div>
+            <div className="people-empty people-loading" role="status"><span className="state-spinner" aria-hidden="true" /><p>Loading subjects…</p></div>
           ) : visiblePeople.length ? (
             <div className="people-list">
               {visiblePeople.map((person, index) => (
@@ -606,7 +612,7 @@ export default function Home() {
                   <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
                   <span>
                     <strong>{person.name}</strong>
-                    <small>{person.mentions} indexed {person.mentions === 1 ? "passage" : "passages"}</small>
+                    <small>{subjectDescription(person)}</small>
                   </span>
                   <b aria-hidden="true">›</b>
                 </button>
@@ -615,7 +621,7 @@ export default function Home() {
           ) : (
             <div className="people-empty">
               <span>◇</span>
-              <p>{documents.length ? "No people were found in this document." : "People will appear here after your first document is indexed."}</p>
+              <p>{documents.length ? "No subjects were found in this document." : "Subjects will appear here after your first document is indexed."}</p>
             </div>
           )}
           <div className="scope-card">
