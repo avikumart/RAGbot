@@ -26,7 +26,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m pytest -q tests/test_api.py tests/test_llm.py tests/test_vectors.py
+      - run: python -m pytest -q --ignore=tests/test_store.py
 
   database-tests:
     name: SQLite database checks
@@ -58,3 +58,22 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run test:e2e
+
+  required-checks:
+    name: All required checks passed
+    if: always()
+    needs:
+      - api-tests
+      - database-tests
+      - frontend-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify required jobs succeeded
+        env:
+          API_RESULT: ${{ needs.api-tests.result }}
+          DATABASE_RESULT: ${{ needs.database-tests.result }}
+          FRONTEND_RESULT: ${{ needs.frontend-tests.result }}
+        run: |
+          test "$API_RESULT" = "success"
+          test "$DATABASE_RESULT" = "success"
+          test "$FRONTEND_RESULT" = "success"
