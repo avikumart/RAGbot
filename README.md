@@ -121,7 +121,9 @@ never require an API key or consume API credits.
 - `backend/tests/`: end-to-end API tests using a temporary data directory
 - `docker-compose.yml`: production-shaped web/API/Qdrant stack with separate persistent volumes
 
-See the [documentation index](docs/README.md) for component-specific setup and data-flow references.
+See the [system architecture](docs/architecture.md) for the end-to-end design, the
+[documentation index](docs/README.md) for component references, and the
+[ADR index](docs/adr/README.md) for durable design decisions.
 
 SQLite is the system of record for documents, stored-file metadata, extracted chunks, people, and their relationships. Qdrant stores only rebuildable embeddings, content hashes, model identifiers, scoping metadata, and SQLite document/chunk references—never authoritative chunk text. Upload commits SQLite first and then indexes vectors in batches. A failed vector step marks the document for reindex without rolling back SQLite.
 
