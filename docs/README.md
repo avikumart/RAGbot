@@ -1,6 +1,7 @@
 # Personagraph documentation
 
-This directory describes the three main application surfaces:
+Start with the [system architecture](architecture.md) for the end-to-end design,
+trust boundaries, data flow, and deployment topology. Component references are:
 
 - [Backend](backend.md): FastAPI service, ingestion, retrieval, and operations.
 - [Frontend](frontend.md): browser application, proxy boundary, and validation commands.
