@@ -25,7 +25,10 @@ Then open:
 - App: <http://localhost:3000>
 - API documentation: <http://localhost:8000/docs>
 
-Try the included `examples/people-notes.txt`, or upload one of your own documents. Files and the authoritative SQLite database persist in `personagraph_data`; derived Qdrant vectors persist separately in `qdrant_data`. The embedding model cache uses `embedding_cache`.
+Try the included `examples/people-notes.txt`, or upload one of your own documents.
+Managed uploads persist in `personagraph_data`, the authoritative PostgreSQL
+database in `postgres_data`, and derived vectors in `qdrant_data`. The embedding
+model cache uses `embedding_cache`.
 
 The first upload downloads `BAAI/bge-small-en-v1.5` into the local model-cache volume. It is a 384-dimensional, MIT-licensed English embedding model; expect roughly 130 MB of model data plus runtime overhead. Later starts reuse the cache.
 
@@ -35,13 +38,16 @@ To stop the app:
 docker compose down
 ```
 
-To also erase uploaded documents, SQLite, model cache, and vectors:
+To also erase uploaded documents, PostgreSQL, model cache, and vectors:
 
 ```bash
 docker compose down --volumes
 ```
 
-Qdrant has no host port in this production-shaped Compose setup. Only the API reaches it on the internal network. Removing only the `personagraph_qdrant_data` volume does not affect uploaded files or SQLite; run the backfill below to rebuild it.
+PostgreSQL and Qdrant have no host ports in this production-shaped Compose
+setup. Only the API reaches them on the internal network. Removing only the
+`personagraph_qdrant_data` volume does not affect uploaded files or PostgreSQL;
+run the backfill below to rebuild it.
 
 ## Vector retrieval configuration
 
@@ -61,7 +67,8 @@ Defaults are shown in `.env.example`:
 | `VECTOR_TIMEOUT_SECONDS` | `5` | Qdrant operation timeout. |
 | `EMBEDDING_TIMEOUT_SECONDS` | `30` | Local embedding-operation timeout. |
 
-To backfill existing SQLite chunks, repair missing/outdated vectors, and remove orphan vectors:
+To backfill existing PostgreSQL chunks, repair missing/outdated vectors, and
+remove orphan vectors:
 
 ```bash
 docker compose run --rm api python -m app.vector_admin backfill
@@ -71,7 +78,7 @@ The command is idempotent and reports `processed`, `skipped`, `failed`, and `del
 
 Do not change the model or dimensions in an existing collection. Personagraph stores collection-level model metadata and refuses model/dimension mismatches. To switch models safely, choose a new `QDRANT_COLLECTION` name and correct `EMBEDDING_DIMENSIONS`, restart the API, then run the backfill. The old collection can be removed after the new index is verified.
 
-If `/api/health` reports Qdrant or embeddings as degraded, check `docker compose logs api qdrant`, confirm the model cache has download space, and verify the collection/model/dimension settings. Uploads remain stored in SQLite and chat automatically uses lexical retrieval, with `retrieval_mode: "lexical-fallback"`, until vector service recovers. Run backfill afterward to repair missed indexing.
+If `/api/health` reports Qdrant or embeddings as degraded, check `docker compose logs api qdrant`, confirm the model cache has download space, and verify the collection/model/dimension settings. Uploads remain stored in PostgreSQL and chat automatically uses lexical retrieval, with `retrieval_mode: "lexical-fallback"`, until vector service recovers. Run backfill afterward to repair missed indexing.
 
 ## Cerebras API generation
 
@@ -102,12 +109,18 @@ npx playwright install chromium
 ./scripts/local_checks.sh
 ```
 
-The API and unit tests cover empty and legacy SQLite database upgrades, idempotent schema migrations (including a pre-existing migration 002 cleanup table), document persistence, vector payloads and IDs, hybrid fusion, person and document scoping, cited semantic retrieval, lexical fallback, recoverable file deletion, invalid cleanup-path retirement, idempotent backfill, orphan cleanup, empty-library behavior, and unsupported files. SQLite schema changes are ordered migrations tracked by `PRAGMA user_version`; migration 001 owns the initial schema, and later schema changes append a new migration.
+The API and unit tests cover document persistence, vector payloads and IDs,
+hybrid fusion, person and document scoping, cited semantic retrieval, lexical
+fallback, recoverable file deletion, invalid cleanup-path retirement,
+idempotent backfill, orphan cleanup, empty-library behavior, and unsupported
+files. A container integration test applies the Alembic baseline to disposable
+PostgreSQL and exercises relational constraints plus store round trips. The
+legacy SQLite migration tests remain as coverage for one-time data import.
 
 Pull requests run `.github/workflows/ci.yml`, which performs three independent checks:
 
 - FastAPI endpoint, mocked vector retrieval/indexing, and mocked Cerebras request-contract tests
-- SQLite schema, foreign-key, persistence, and cascade-delete tests
+- PostgreSQL Alembic, foreign-key, persistence, and cascade-delete tests
 - Frontend lint, build, server-rendering tests, and a browser-level degraded-index workflow
 
 The vector tests use fake vector stores and embedding providers, so they do not require a
@@ -117,33 +130,38 @@ never require an API key or consume API credits.
 ## Architecture
 
 - `frontend/`: responsive React/vinext browser client, its tests, and client-side D1 schema
-- `backend/app/`: FastAPI ingestion, authoritative SQLite storage, local embeddings, Qdrant indexing, hybrid retrieval, and optional Cerebras generation
+- `backend/app/`: FastAPI ingestion, authoritative PostgreSQL storage, local embeddings, Qdrant indexing, hybrid retrieval, and optional Cerebras generation
 - `backend/tests/`: end-to-end API tests using a temporary data directory
-- `docker-compose.yml`: production-shaped web/API/Qdrant stack with separate persistent volumes
+- `docker-compose.yml`: production-shaped web/API/PostgreSQL/Qdrant stack with separate persistent volumes
 
 See the [system architecture](docs/architecture.md) for the end-to-end design, the
 [documentation index](docs/README.md) for component references, and the
 [ADR index](docs/adr/README.md) for durable design decisions.
 
-SQLite is the system of record for documents, stored-file metadata, extracted chunks, people, and their relationships. Qdrant stores only rebuildable embeddings, content hashes, model identifiers, scoping metadata, and SQLite document/chunk references—never authoritative chunk text. Upload commits SQLite first and then indexes vectors in batches. A failed vector step marks the document for reindex without rolling back SQLite.
+PostgreSQL is the system of record for documents, stored-file metadata,
+extracted chunks, people, and their relationships. Qdrant stores only
+rebuildable embeddings, content hashes, model identifiers, scoping metadata,
+and PostgreSQL document/chunk references—never authoritative chunk text. Upload
+commits PostgreSQL first and then indexes vectors in batches. A failed vector
+step marks the document for reindex without rolling back PostgreSQL.
 
 `GET /api/documents` includes `index_status`, `index_error`, and `index_updated_at` for every document. Status values currently include `pending`, `indexing`, `ready`, `needs_reindex`, and `disabled`. A document with no index-state row (for example, a legacy document) defaults to `pending`, with a null error and update timestamp. Index failures return a safe, actionable error message; internal exception details are retained only for diagnostics and are not exposed by this endpoint.
 
-At query time Personagraph scopes both retrieval paths, identifies people using existing behavior, and combines lexical and vector ranks with deterministic Reciprocal Rank Fusion. Person boosts are applied after fusion. Every Qdrant hit is checked against scoped SQLite rows, and source excerpts, filenames, and pages always come from SQLite. This also prevents stale vectors for deleted documents from reaching an answer.
+At query time Personagraph scopes both retrieval paths, identifies people using existing behavior, and combines lexical and vector ranks with deterministic Reciprocal Rank Fusion. Person boosts are applied after fusion. Every Qdrant hit is checked against scoped PostgreSQL rows, and source excerpts, filenames, and pages always come from PostgreSQL. This also prevents stale vectors for deleted documents from reaching an answer.
 
-Deletion is ordered so SQLite remains authoritative and post-commit cleanup is recoverable. A single SQLite transaction first records the stored path in `pending_file_cleanup`, then deletes the document row and its cascading metadata. After the transaction commits, the API best-effort unlinks the uploaded file and removes the cleanup record; an unlink failure is logged, recorded with its attempt details, and still returns a successful document deletion. Pending managed files are retried during the next startup or deletion. A queued path that does not resolve inside the managed upload directory is never unlinked; it is logged and retired from the queue so an invalid or legacy path cannot create a permanent retry loop. Matching vectors are deleted last. If Qdrant is unavailable, deletion still succeeds; the next backfill/reconciliation removes the vector orphan. Qdrant or filesystem loss cannot make an already-committed deletion appear to have failed.
+Deletion is ordered so PostgreSQL remains authoritative and post-commit cleanup is recoverable. A single PostgreSQL transaction first records the stored path in `pending_file_cleanup`, then deletes the document row and its cascading metadata. After the transaction commits, the API best-effort unlinks the uploaded file and removes the cleanup record; an unlink failure is logged, recorded with its attempt details, and still returns a successful document deletion. Pending managed files are retried during the next startup or deletion. A queued path that does not resolve inside the managed upload directory is never unlinked; it is logged and retired from the queue so an invalid or legacy path cannot create a permanent retry loop. Matching vectors are deleted last. If Qdrant is unavailable, deletion still succeeds; the next backfill/reconciliation removes the vector orphan. Qdrant or filesystem loss cannot make an already-committed deletion appear to have failed.
 
 ## Conversation persistence and privacy
 
-Conversations are durable, user-scoped records in the same authoritative SQLite database as documents. Each successful turn stores the question, answer, retrieval mode, answer mode, and a snapshot of every citation (including filename, page, excerpt, and score). Deleting or changing a document therefore does not erase the citations shown on a historical answer. Starting a new conversation leaves existing conversations intact; deleting a conversation cascades only to its messages, never to documents.
+Conversations are durable, user-scoped records in the same authoritative PostgreSQL database as documents. Each successful turn stores the question, answer, retrieval mode, answer mode, and a snapshot of every citation (including filename, page, excerpt, and score). Deleting or changing a document therefore does not erase the citations shown on a historical answer. Starting a new conversation leaves existing conversations intact; deleting a conversation cascades only to its messages, never to documents.
 
-The web app caches the active conversation ID, composer draft, selected document/person context, and any optimistic or failed messages in versioned browser storage. That cache makes reloads responsive and keeps a failed turn retryable, but the SQLite session is reconciled after load and is always authoritative.
+The web app caches the active conversation ID, composer draft, selected document/person context, and any optimistic or failed messages in versioned browser storage. That cache makes reloads responsive and keeps a failed turn retryable, but the PostgreSQL session is reconciled after load and is always authoritative.
 
 Session and chat requests use a same-origin web proxy. It derives an opaque owner identifier from the authenticated ChatGPT identity and signs it before forwarding to FastAPI; the browser cannot submit a user ID or email to select an owner. Configure a shared, non-empty `AUTH_PROXY_SECRET` in both the `api` and `web` services before exposing the app outside local development. When it is intentionally unset, FastAPI uses the fixed `LOCAL_DEVELOPMENT_OWNER` identity so a local Docker setup remains usable without ChatGPT authentication. Session reads, updates, and deletes for any other owner return `404`.
 
 ## Privacy and limitations
 
-- Uploaded bytes and the SQLite index stay in the local Docker volume.
+- Uploaded bytes and PostgreSQL records stay in separate local Docker volumes.
 - Local embedding sends no text to a hosted service. Qdrant runs only on the Compose network by default, and its payload is not an authorization boundary.
 - When `CEREBRAS_API_KEY` is configured, each question and its retrieved source excerpts are sent to the Cerebras API. The application does not send the complete document unless its full contents happen to be selected as retrieved excerpts.
 - An external embedding provider is intentionally not enabled by default. If one is added later, sending chunk text externally must be an explicit configuration choice with the provider's privacy terms reviewed.

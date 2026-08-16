@@ -11,7 +11,7 @@ from .vector_service import VectorService
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Backfill missing vectors and remove Qdrant records orphaned from SQLite."
+        description="Backfill missing vectors and remove Qdrant records orphaned from PostgreSQL."
     )
     parser.add_argument("command", choices=["backfill"])
     args = parser.parse_args()
@@ -20,7 +20,7 @@ def main() -> int:
     settings = Settings.from_env()
     if not settings.vector_search_enabled:
         parser.error("VECTOR_SEARCH_ENABLED must be true to run vector backfill")
-    store = Store(settings.data_dir)
+    store = Store(settings.data_dir, settings.database_url)
     store.initialize()
     stats = VectorService(settings, store).reconcile()
     print(json.dumps(stats.__dict__, sort_keys=True))

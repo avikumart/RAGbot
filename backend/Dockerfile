@@ -14,11 +14,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 FROM base AS test
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY app ./app
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 COPY tests ./tests
 CMD ["pytest", "-q"]
 
 FROM base AS runtime
 COPY app ./app
+COPY alembic.ini ./alembic.ini
+COPY alembic ./alembic
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /data /models \
