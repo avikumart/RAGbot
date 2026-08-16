@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+from .database import DatabaseConnection, connect, is_postgresql_url, run_alembic_upgrade
 from .extraction import Chunk
 from .migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
 
@@ -20,21 +20,26 @@ logger = logging.getLogger(__name__)
 
 
 class Store:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, database_url: str | None = None):
         self.data_dir = data_dir
         self.upload_dir = data_dir / "uploads"
         self.db_path = data_dir / "personagraph.db"
+        self.database_url = database_url or f"sqlite:///{self.db_path}"
 
-    def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.db_path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+    @property
+    def database_component(self) -> str:
+        return "postgresql" if is_postgresql_url(self.database_url) else "sqlite"
+
+    def connect(self) -> DatabaseConnection:
+        return connect(self.database_url)
 
     def initialize(self) -> None:
         self.upload_dir.mkdir(parents=True, exist_ok=True)
-        with self.connect() as connection:
-            self._migrate(connection)
+        if is_postgresql_url(self.database_url):
+            run_alembic_upgrade(self.database_url)
+        else:
+            with self.connect() as connection:
+                self._migrate(connection)
         # File deletion is deliberately retried after schema initialization. A
         # previous process may have committed a document deletion but failed to
         # unlink its uploaded file because of a transient filesystem error.
@@ -46,7 +51,7 @@ class Store:
             logger.exception("Pending uploaded-file cleanup retry failed")
 
     @staticmethod
-    def _migrate(connection: sqlite3.Connection) -> None:
+    def _migrate(connection: DatabaseConnection) -> None:
         # The write lock is acquired before reading user_version so concurrent
         # startup cannot apply the same non-idempotent future migration twice.
         connection.execute("BEGIN IMMEDIATE")
@@ -185,7 +190,7 @@ class Store:
         )
 
     @staticmethod
-    def _chat_session_dict(row: sqlite3.Row) -> dict:
+    def _chat_session_dict(row) -> dict:
         return {
             "id": row["id"],
             "topic": row["topic"],
@@ -196,7 +201,7 @@ class Store:
         }
 
     @staticmethod
-    def _chat_message_dict(row: sqlite3.Row) -> dict:
+    def _chat_message_dict(row) -> dict:
         return {
             "id": row["id"],
             "ordinal": row["ordinal"],
@@ -397,9 +402,10 @@ class Store:
                             "assistant_message": self._chat_message_dict(assistant),
                         }
                     next_ordinal = connection.execute(
-                        "SELECT COALESCE(MAX(ordinal), -1) + 1 FROM chat_messages WHERE session_id = ?",
+                        """SELECT COALESCE(MAX(ordinal), -1) + 1 AS next_ordinal
+                        FROM chat_messages WHERE session_id = ?""",
                         (resolved_session_id,),
-                    ).fetchone()[0]
+                    ).fetchone()["next_ordinal"]
                     next_topic = topic if session["topic"] == "New conversation" else session["topic"]
                     connection.execute(
                         """UPDATE chat_sessions SET topic = ?, document_ids_json = ?, person = ?, updated_at = ?
@@ -506,7 +512,7 @@ class Store:
 
     def delete_document(self, document_id: str) -> bool:
         # Deletion ordering is intentional:
-        # 1. In one SQLite transaction, durably queue the file path and delete
+        # 1. In one database transaction, durably queue the file path and delete
         #    the authoritative document row (which cascades to related rows).
         # 2. After that transaction commits, best-effort unlink queued files.
         # A filesystem failure therefore cannot roll back or misreport an
@@ -536,7 +542,7 @@ class Store:
             # the cost of entering the cleanup path.
             self.cleanup_pending_files()
         except Exception:
-            # SQLite deletion has committed and the pending cleanup row is the
+            # The database deletion has committed and the pending cleanup row is the
             # recovery mechanism. Do not return an error for a deleted document.
             logger.exception(
                 "Uploaded-file cleanup deferred; pending cleanup retained "

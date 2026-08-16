@@ -106,7 +106,7 @@ def create_app(
     data_dir: Path | None = None, vector_service: VectorService | None = None
 ) -> FastAPI:
     settings = Settings.from_env(data_dir)
-    store = Store(settings.data_dir)
+    store = Store(settings.data_dir, settings.database_url)
     vectors = vector_service or VectorService(settings, store)
 
     @asynccontextmanager
@@ -133,16 +133,19 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict:
-        sqlite_status = "ready"
-        sqlite_error = None
+        database_status = "ready"
+        database_error = None
         try:
             with store.connect() as connection:
                 connection.execute("SELECT 1").fetchone()
         except Exception as exc:
-            sqlite_status, sqlite_error = "unavailable", str(exc)
+            database_status, database_error = "unavailable", str(exc)
         components = {
             "api": {"status": "ready"},
-            "sqlite": {"status": sqlite_status, "error": sqlite_error},
+            store.database_component: {
+                "status": database_status,
+                "error": database_error,
+            },
             **vectors.health(),
         }
         degraded = any(
@@ -202,7 +205,7 @@ def create_app(
                     skipped,
                 )
             except Exception as exc:
-                # SQLite is authoritative. The retained document remains searchable
+                # PostgreSQL is authoritative. The retained document remains searchable
                 # lexically and is repairable through the backfill command.
                 store.set_vector_status(
                     document_id,
@@ -228,7 +231,7 @@ def create_app(
             vectors.delete_document(document_id)
         except Exception as exc:
             logger.warning(
-                "SQLite document deleted; deferred Qdrant cleanup document_id=%s reason=%s",
+                "PostgreSQL document deleted; deferred Qdrant cleanup document_id=%s reason=%s",
                 document_id,
                 exc,
             )

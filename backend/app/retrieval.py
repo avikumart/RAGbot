@@ -126,7 +126,7 @@ def hybrid_retrieve(
     if vector_service and vector_service.enabled:
         try:
             raw_vector = vector_service.search(question, document_ids, vector_limit)
-            # Qdrant is derived state: only candidates still present in scoped SQLite
+            # Qdrant is derived state: only candidates still present in scoped PostgreSQL
             # rows are eligible for answers and citations.
             valid = {
                 int(chunk["id"]): chunk

@@ -29,8 +29,24 @@ jobs:
       - run: python -m pytest -q --ignore=tests/test_store.py
 
   database-tests:
-    name: SQLite database checks
+    name: PostgreSQL migrations and database checks
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: personagraph_test
+          POSTGRES_USER: personagraph
+          POSTGRES_PASSWORD: personagraph
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U personagraph -d personagraph_test"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      TEST_POSTGRES_URL: postgresql://personagraph:personagraph@127.0.0.1:5432/personagraph_test
     defaults:
       run:
         working-directory: backend
@@ -42,7 +58,7 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements*.txt
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m pytest -q tests/test_store.py
+      - run: python -m pytest -q tests/test_store.py tests/test_postgres_integration.py
 
   frontend-tests:
     name: Frontend build and rendering checks
