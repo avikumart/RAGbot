@@ -61,7 +61,7 @@ jobs:
       - run: python -m pytest -q tests/test_store.py tests/test_postgres_integration.py
 
   frontend-tests:
-    name: Frontend build and rendering checks
+    name: Frontend build, lint, and Playwright E2E checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -75,6 +75,18 @@ jobs:
       - run: npm test
       - run: npm run test:e2e
 
+  compose-validation:
+    name: Docker Compose and container build validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate Compose specification
+        run: docker compose config --quiet
+      - name: Build backend test image
+        run: docker build --target test -t personagraph-api-test ./backend
+      - name: Run containerized backend test suite
+        run: docker run --rm personagraph-api-test pytest -q --ignore=tests/test_postgres_integration.py
+
   required-checks:
     name: All required checks passed
     if: always()
@@ -82,6 +94,7 @@ jobs:
       - api-tests
       - database-tests
       - frontend-tests
+      - compose-validation
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs succeeded
@@ -89,7 +102,9 @@ jobs:
           API_RESULT: ${{ needs.api-tests.result }}
           DATABASE_RESULT: ${{ needs.database-tests.result }}
           FRONTEND_RESULT: ${{ needs.frontend-tests.result }}
+          COMPOSE_RESULT: ${{ needs.compose-validation.result }}
         run: |
           test "$API_RESULT" = "success"
           test "$DATABASE_RESULT" = "success"
           test "$FRONTEND_RESULT" = "success"
+          test "$COMPOSE_RESULT" = "success"
