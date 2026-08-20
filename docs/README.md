@@ -20,6 +20,7 @@ Welcome to the Personagraph (RAGbot) documentation library. This directory conta
 ### 3. Strategy & Evolution
 - **[Product Roadmap](roadmap.md)**: Planned phases and tracking GitHub issues ([#37](https://github.com/avikumart/RAGbot/issues/37)–[#47](https://github.com/avikumart/RAGbot/issues/47)).
 - **[Architecture Decision Records (ADRs)](adr/README.md)**: Log of architectural decisions and trade-off evaluations.
+- **[Weekly PR Timeline](timeline.md)**: Chronological weekly breakdown and deliverables of merged pull requests.
 
 ---
 
