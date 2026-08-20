@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from .config import Settings
 from .extraction import ExtractionError, chunk_pages, count_people, extract_pages
 from .llm import generate_with_cerebras
+from .reranker import RerankerService
 from .retrieval import hybrid_retrieve, synthesize_answer
 from .store import Store
 from .vector_service import VectorService
@@ -320,6 +321,7 @@ def create_app(
             vector_service=vectors,
             lexical_limit=settings.lexical_candidate_limit,
             vector_limit=settings.vector_candidate_limit,
+            reranker=RerankerService(enabled=settings.reranker_enabled, model_name=settings.reranker_model),
         )
         generated = await generate_with_cerebras(
             api_key=settings.cerebras_api_key,

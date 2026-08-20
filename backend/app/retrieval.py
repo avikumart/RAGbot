@@ -6,6 +6,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 
+from .reranker import RerankerService
 from .store import Store
 from .vector_service import VectorService
 
@@ -113,6 +114,7 @@ def hybrid_retrieve(
     vector_service: VectorService | None = None,
     lexical_limit: int = 20,
     vector_limit: int = 20,
+    reranker: RerankerService | None = None,
 ) -> tuple[list[str], list[dict], str]:
     chunks = store.get_chunks(document_ids)
     known_people = store.list_people(document_ids)
@@ -155,10 +157,13 @@ def hybrid_retrieve(
             elif person.split()[0].casefold() in content:
                 fused[chunk_id] += 0.01
 
-    chosen = sorted(
+    fused_candidates = sorted(
         ((score, chunk_by_id[chunk_id]) for chunk_id, score in fused.items() if chunk_id in chunk_by_id),
         key=lambda item: (-item[0], int(item[1]["id"])),
-    )[:top_k]
+    )
+    if reranker is not None:
+        fused_candidates = reranker.rerank(question, fused_candidates)
+    chosen = fused_candidates[:top_k]
     if not chosen:
         return people, [], retrieval_mode
     maximum = chosen[0][0]

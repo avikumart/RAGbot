@@ -27,6 +27,9 @@ class Settings:
     embedding_timeout_seconds: float
     auth_proxy_secret: str
     local_development_owner: str
+    reranker_enabled: bool
+    reranker_model: str
+    rerank_top_n: int
 
     @classmethod
     def from_env(cls, data_dir: Path | None = None) -> "Settings":
@@ -71,4 +74,8 @@ class Settings:
             local_development_owner=os.getenv(
                 "LOCAL_DEVELOPMENT_OWNER", "local-development-user"
             ).strip() or "local-development-user",
+            reranker_enabled=os.getenv("RERANKER_ENABLED", "true").casefold()
+            in {"1", "true", "yes", "on"},
+            reranker_model=os.getenv("RERANKER_MODEL", "ms-marco-MiniLM-L-6-v2"),
+            rerank_top_n=int(os.getenv("RERANK_TOP_N", "20")),
         )
