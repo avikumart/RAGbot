@@ -54,10 +54,36 @@ def identify_people(question: str, known_people: list[dict], explicit: str | Non
 
 
 def lexical_candidates(
-    chunks: list[dict], question: str, people: list[str], limit: int
+    chunks: list[dict],
+    question: str,
+    people: list[str],
+    limit: int,
+    store: Store | None = None,
+    document_ids: list[str] | None = None,
 ) -> list[RankedChunk]:
     if not chunks:
         return []
+
+    if store is not None and getattr(store, "database_component", "") == "sqlite":
+        fts_hits = store.search_fts(question + " " + " ".join(people), document_ids=document_ids, limit=limit)
+        if fts_hits:
+            chunk_by_id = {int(c["id"]): c for c in chunks}
+            scored: list[RankedChunk] = []
+            for item in fts_hits:
+                cid = item["chunk_id"]
+                if cid not in chunk_by_id:
+                    continue
+                score = item["score"]
+                folded_content = chunk_by_id[cid]["content"].casefold()
+                for person in people:
+                    if person.casefold() in folded_content:
+                        score += 4.0
+                    elif person.split()[0].casefold() in folded_content:
+                        score += 1.0
+                scored.append(RankedChunk(cid, score))
+            if scored:
+                return sorted(scored, key=lambda item: (-item.score, item.chunk_id))[:limit]
+
     query_terms = tokenize(question + " " + " ".join(people))
     document_frequency: Counter[str] = Counter()
     tokenized_chunks: list[list[str]] = []
@@ -120,7 +146,7 @@ def hybrid_retrieve(
     if not chunks:
         return people, [], "lexical"
 
-    lexical = lexical_candidates(chunks, question, people, lexical_limit)
+    lexical = lexical_candidates(chunks, question, people, lexical_limit, store=store, document_ids=document_ids)
     vector: list[RankedChunk] = []
     retrieval_mode = "lexical"
     if vector_service and vector_service.enabled:

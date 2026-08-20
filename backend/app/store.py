@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from .database import DatabaseConnection, connect, is_postgresql_url, run_alembic_upgrade
@@ -111,6 +113,16 @@ class Store:
                     for chunk in chunks
                 ],
             )
+            if self.database_component == "sqlite":
+                inserted_chunks = connection.execute(
+                    "SELECT id, content FROM chunks WHERE document_id = ? ORDER BY ordinal",
+                    (document_id,),
+                ).fetchall()
+                connection.executemany(
+                    """INSERT INTO chunks_fts (content, document_id, chunk_id)
+                    VALUES (?, ?, ?)""",
+                    [(row["content"], document_id, str(row["id"])) for row in inserted_chunks],
+                )
             connection.executemany(
                 """INSERT INTO people (document_id, name, normalized, mentions)
                 VALUES (?, ?, ?, ?)""",
@@ -536,6 +548,8 @@ class Store:
                 last_error=NULL""",
                 (stored_path, document_id, datetime.now(UTC).isoformat()),
             )
+            if self.database_component == "sqlite":
+                connection.execute("DELETE FROM chunks_fts WHERE document_id = ?", (document_id,))
             connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
         try:
             # Retry every queued path while a deletion request has already paid
@@ -643,3 +657,45 @@ class Store:
         except (OSError, RuntimeError):
             return False
         return resolved_path != upload_dir and upload_dir in resolved_path.parents
+
+    def search_fts(
+        self, query: str, document_ids: list[str] | None = None, limit: int = 20
+    ) -> list[dict]:
+        """Query SQLite FTS5 index for full-text search with BM25 ranking."""
+        if self.database_component != "sqlite":
+            return []
+
+        terms = [t for t in re.findall(r"[a-zA-Z0-9'-]+", query) if len(t) > 1]
+        if not terms:
+            return []
+
+        fts_query = " OR ".join(f'"{t}"*' for t in terms)
+        sql = """
+            SELECT chunk_id, content, document_id, bm25(chunks_fts) AS fts_score
+            FROM chunks_fts
+            WHERE chunks_fts MATCH ?
+        """
+        params: list[Any] = [fts_query]
+        if document_ids:
+            placeholders = ", ".join("?" for _ in document_ids)
+            sql += f" AND document_id IN ({placeholders})"
+            params.extend(document_ids)
+        sql += " ORDER BY bm25(chunks_fts) ASC LIMIT ?"
+        params.append(limit)
+
+        try:
+            with self.connect() as connection:
+                rows = connection.execute(sql, params).fetchall()
+                return [
+                    {
+                        "chunk_id": int(row["chunk_id"]),
+                        "content": row["content"],
+                        "document_id": row["document_id"],
+                        "score": -float(row["fts_score"]),
+                    }
+                    for row in rows
+                ]
+        except Exception as exc:
+            logger.warning("FTS5 search failed: %s", exc)
+            return []
+
