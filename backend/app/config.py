@@ -27,6 +27,8 @@ class Settings:
     embedding_timeout_seconds: float
     auth_proxy_secret: str
     local_development_owner: str
+    chunk_size: int
+    chunk_overlap: int
 
     @classmethod
     def from_env(cls, data_dir: Path | None = None) -> "Settings":
@@ -71,4 +73,6 @@ class Settings:
             local_development_owner=os.getenv(
                 "LOCAL_DEVELOPMENT_OWNER", "local-development-user"
             ).strip() or "local-development-user",
+            chunk_size=int(os.getenv("CHUNK_SIZE", "800")),
+            chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
         )

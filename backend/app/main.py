@@ -176,7 +176,7 @@ def create_app(
             raise HTTPException(status_code=400, detail="The uploaded document is empty.")
         try:
             pages = extract_pages(filename, payload)
-            chunks = chunk_pages(pages)
+            chunks = chunk_pages(pages, limit=settings.chunk_size, overlap=settings.chunk_overlap)
         except ExtractionError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 

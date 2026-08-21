@@ -131,31 +131,46 @@ def _split_long_paragraph(paragraph: str, limit: int) -> list[str]:
     return pieces
 
 
-def chunk_pages(pages: list[ExtractedPage], limit: int = 900) -> list[Chunk]:
+def chunk_pages(
+    pages: list[ExtractedPage], limit: int = 800, overlap: int = 150
+) -> list[Chunk]:
+    if limit <= 0:
+        limit = 800
+    overlap = max(0, min(overlap, limit // 2))
+
     chunks: list[Chunk] = []
     ordinal = 0
     for page in pages:
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", page.text) if part.strip()]
-        units: list[str] = []
-        for paragraph in paragraphs:
-            units.extend(_split_long_paragraph(paragraph, limit))
+        text = page.text.strip()
+        if not text:
+            continue
 
-        current: list[str] = []
-        for unit in units:
-            candidate = "\n\n".join(current + [unit])
-            if current and len(candidate) > limit:
-                content = "\n\n".join(current)
+        start = 0
+        text_len = len(text)
+        while start < text_len:
+            end = min(start + limit, text_len)
+            if end < text_len:
+                space_idx = text.rfind(" ", start, end)
+                if space_idx > start:
+                    end = space_idx
+
+            content = text[start:end].strip()
+            if content:
                 chunks.append(
                     Chunk(ordinal, page.page, content, tuple(extract_people(content)))
                 )
                 ordinal += 1
-                current = [unit]
-            else:
-                current.append(unit)
-        if current:
-            content = "\n\n".join(current)
-            chunks.append(Chunk(ordinal, page.page, content, tuple(extract_people(content))))
-            ordinal += 1
+
+            if end >= text_len:
+                break
+
+            next_start = max(start + 1, end - overlap)
+            if next_start < text_len:
+                space_idx = text.find(" ", next_start, end)
+                if space_idx != -1:
+                    next_start = space_idx + 1
+            start = next_start
+
     return chunks
 
 
@@ -164,4 +179,5 @@ def count_people(chunks: list[Chunk]) -> Counter[str]:
     for chunk in chunks:
         counts.update(chunk.people)
     return counts
+
 
