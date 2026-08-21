@@ -27,6 +27,9 @@ class Settings:
     embedding_timeout_seconds: float
     auth_proxy_secret: str
     local_development_owner: str
+    reranker_enabled: bool
+    reranker_model: str
+    rerank_top_n: int
     chunk_size: int
     chunk_overlap: int
 
@@ -73,6 +76,10 @@ class Settings:
             local_development_owner=os.getenv(
                 "LOCAL_DEVELOPMENT_OWNER", "local-development-user"
             ).strip() or "local-development-user",
+            reranker_enabled=os.getenv("RERANKER_ENABLED", "true").casefold()
+            in {"1", "true", "yes", "on"},
+            reranker_model=os.getenv("RERANKER_MODEL", "ms-marco-MiniLM-L-6-v2"),
+            rerank_top_n=int(os.getenv("RERANK_TOP_N", "20")),
             chunk_size=int(os.getenv("CHUNK_SIZE", "800")),
             chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
         )
