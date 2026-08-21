@@ -7,24 +7,54 @@ optional answer generation. Qdrant stores rebuildable vector indexes only.
 
 ## Runtime topology
 
-```text
-Browser
-  |
-  | HTTPS
-  v
-Vinext frontend / Cloudflare worker
-  |-- serves the React application
-  |-- derives an opaque owner identity
-  |-- signs trusted chat/session requests
-  |
-  | HTTP + X-Persona-* signature headers
-  v
-FastAPI backend
-  |-- relational database: authoritative application records
-  |-- upload volume: original managed files
-  |-- Qdrant: rebuildable embeddings and lookup metadata
-  `-- Cerebras API: optional grounded answer generation
+```mermaid
+flowchart TD
+    subgraph Client["Client Layer (Browser)"]
+        UI["React 19 / Vinext SPA"]
+        ChatUI["Interactive Chat UI"]
+    end
+
+    subgraph Security["Edge Signing Zone"]
+        Proxy["Vinext API Signing Proxy"]
+        AuthHMAC["HMAC Signer (x-personagraph-owner)"]
+    end
+
+    subgraph Backend["FastAPI Application"]
+        API["FastAPI Endpoints"]
+        Ingestion["Extraction & Sliding Window Chunker"]
+        Retrieval["Hybrid Retrieval Engine (RRF + Reranker)"]
+    end
+
+    subgraph Storage["Authoritative & Search Storage"]
+        DB[("Relational Database\nPostgreSQL / SQLite")]
+        FTS5[("SQLite FTS5 Index\nC-Level BM25 Index")]
+        Qdrant[("Qdrant Vector DB\nFastEmbed Dense Vectors")]
+        Volume[("Upload Volume\nManaged Files")]
+    end
+
+    subgraph LLM["Generative AI"]
+        Cerebras["Cerebras Cloud LLM API"]
+    end
+
+    UI --> Proxy
+    ChatUI --> Proxy
+    Proxy --> AuthHMAC
+    AuthHMAC -- Signed HTTP --> API
+
+    API --> Ingestion
+    Ingestion --> DB
+    Ingestion --> FTS5
+    Ingestion --> Qdrant
+    Ingestion --> Volume
+
+    API --> Retrieval
+    Retrieval <--> FTS5
+    Retrieval <--> Qdrant
+    Retrieval <--> DB
+    API --> Cerebras
 ```
+
+*For interactive sequence diagrams of Document Ingestion and Hybrid Retrieval, see **[docs/system-diagram.md](system-diagram.md)**.*
 
 Docker Compose is the production-shaped local topology. It runs the web, API,
 and Qdrant services and mounts separate persistent volumes for authoritative

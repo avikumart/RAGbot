@@ -152,7 +152,9 @@ def test_opening_version_2_database_adds_chat_tables_and_preserves_documents(tmp
 
     assert store.get_document("version-2")["filename"] == "version-2.txt"
     with store.connect() as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == (
+            LATEST_SCHEMA_VERSION
+        )
         assert connection.execute("SELECT COUNT(*) FROM chat_sessions").fetchone()[0] == 0
 
 
@@ -414,3 +416,45 @@ def test_document_index_status_is_returned_without_internal_error_details(tmp_pa
     assert document["index_updated_at"] is not None
     assert "qdrant.internal" not in document["index_error"]
     assert "secret-value" not in document["index_error"]
+
+
+def test_fts5_indexing_and_search(tmp_path):
+    store = Store(tmp_path)
+    store.initialize()
+    stored_path = tmp_path / "uploads" / "doc.txt"
+    stored_path.parent.mkdir(parents=True, exist_ok=True)
+    stored_path.write_text("Full text search with SQLite FTS5 engine.")
+
+    store.add_document(
+        document_id="fts-doc-1",
+        filename="fts.txt",
+        content_type="text/plain",
+        stored_path=stored_path,
+        digest="digest-fts",
+        size_bytes=40,
+        chunks=[
+            Chunk(
+                ordinal=0,
+                page=None,
+                content="Quantum computing and artificial intelligence research.",
+                people=("Maya Patel",),
+            ),
+            Chunk(
+                ordinal=1,
+                page=None,
+                content="Full text search indexing with SQLite FTS5 extension.",
+                people=(),
+            ),
+        ],
+        people={"Maya Patel": 1},
+    )
+
+    results = store.search_fts("Quantum computing")
+    assert len(results) >= 1
+    assert results[0]["document_id"] == "fts-doc-1"
+    assert "Quantum" in results[0]["content"]
+
+    # Test deletion cleans up FTS5
+    assert store.delete_document("fts-doc-1")
+    assert len(store.search_fts("Quantum computing")) == 0
+

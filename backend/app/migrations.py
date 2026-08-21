@@ -83,9 +83,21 @@ MIGRATION_003_CHAT_SESSIONS = (
 )
 
 
+MIGRATION_004_CHUNKS_FTS = (
+    """CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+        content,
+        document_id UNINDEXED,
+        chunk_id UNINDEXED,
+        tokenize='porter unicode61'
+    )""",
+)
+
+
 MIGRATIONS = (
     (1, MIGRATION_001_INITIAL_SCHEMA),
     (2, MIGRATION_002_PENDING_FILE_CLEANUP),
     (3, MIGRATION_003_CHAT_SESSIONS),
+    (4, MIGRATION_004_CHUNKS_FTS),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
+
