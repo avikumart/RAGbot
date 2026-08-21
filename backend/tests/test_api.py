@@ -5,8 +5,10 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.llm import LLMProvider, LLMService
 from app.main import create_app, opaque_owner_id
 from app.vector_store import VectorCandidate
+
 
 
 SAMPLE = b"""People notes
@@ -160,6 +162,93 @@ def test_chat_queries_cerebras_once_for_each_fresh_grounded_question(tmp_path, m
         )
     finally:
         client.__exit__(None, None, None)
+
+
+def test_chat_uses_custom_injected_llm_service(tmp_path):
+    class MockCustomProvider(LLMProvider):
+        @property
+        def provider_name(self) -> str:
+            return "mock-provider"
+
+        @property
+        def model_name(self) -> str:
+            return "v1"
+
+        def is_configured(self) -> bool:
+            return True
+
+        async def _send_request(self, client, *, question, context):
+            return "Injected provider response [1]."
+
+    custom_service = LLMService(MockCustomProvider())
+    app = create_app(tmp_path, llm_service=custom_service)
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents",
+            files={"file": ("people-notes.txt", SAMPLE, "text/plain")},
+        ).json()
+        response = client.post(
+            "/api/chat",
+            json={"message": "What does Jordan Lee own?", "document_ids": [upload["id"]]},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mode"] == "mock-provider:v1"
+        assert payload["answer"] == "Injected provider response [1]."
+
+
+def test_chat_uses_openai_provider_when_configured(tmp_path, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == "Bearer test-openai-key"
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "OpenAI generated answer [1]."}}]},
+        )
+
+    transport = httpx.MockTransport(handler)
+    # We can inject client via provider or test create_app with configured OpenAI
+    client_mock = httpx.AsyncClient(transport=transport)
+
+    from app.config import Settings
+    from app.llm import create_llm_provider
+    settings = Settings.from_env(tmp_path)
+    provider = create_llm_provider(settings)
+
+    class TransportProvider(LLMProvider):
+        @property
+        def provider_name(self) -> str:
+            return provider.provider_name
+
+        @property
+        def model_name(self) -> str:
+            return provider.model_name
+
+        def is_configured(self) -> bool:
+            return provider.is_configured()
+
+        async def _send_request(self, client, *, question, context):
+            return await provider._send_request(client_mock, question=question, context=context)
+
+    app = create_app(tmp_path, llm_service=LLMService(TransportProvider()))
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents",
+            files={"file": ("people-notes.txt", SAMPLE, "text/plain")},
+        ).json()
+        response = client.post(
+            "/api/chat",
+            json={"message": "What does Jordan Lee own?", "document_ids": [upload["id"]]},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mode"] == "openai:gpt-4o-mini"
+        assert payload["answer"] == "OpenAI generated answer [1]."
 
 
 def test_chat_honors_document_scope(tmp_path):

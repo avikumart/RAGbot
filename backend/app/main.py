@@ -16,11 +16,12 @@ from pydantic import BaseModel, Field
 
 from .config import Settings
 from .extraction import ExtractionError, chunk_pages, count_people, extract_pages
-from .llm import generate_with_cerebras
+from .llm import LLMService, create_llm_provider, generate_with_cerebras
 from .reranker import RerankerService
 from .retrieval import hybrid_retrieve, synthesize_answer
 from .store import Store
 from .vector_service import VectorService
+
 
 
 logger = logging.getLogger(__name__)
@@ -104,11 +105,14 @@ def decode_cursor(value: str | None) -> tuple[str, str] | None:
 
 
 def create_app(
-    data_dir: Path | None = None, vector_service: VectorService | None = None
+    data_dir: Path | None = None,
+    vector_service: VectorService | None = None,
+    llm_service: LLMService | None = None,
 ) -> FastAPI:
     settings = Settings.from_env(data_dir)
     store = Store(settings.data_dir, settings.database_url)
     vectors = vector_service or VectorService(settings, store)
+    llm = llm_service or LLMService(create_llm_provider(settings))
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -124,6 +128,7 @@ def create_app(
     app.state.settings = settings
     app.state.store = store
     app.state.vector_service = vectors
+    app.state.llm_service = llm
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -323,15 +328,26 @@ def create_app(
             vector_limit=settings.vector_candidate_limit,
             reranker=RerankerService(enabled=settings.reranker_enabled, model_name=settings.reranker_model),
         )
-        generated = await generate_with_cerebras(
-            api_key=settings.cerebras_api_key,
-            base_url=settings.cerebras_base_url,
-            model=settings.cerebras_model,
-            question=payload.message,
-            sources=sources,
-        )
+        if llm_service is not None:
+            generated, mode = await llm.generate(
+                question=payload.message,
+                sources=sources,
+            )
+        elif settings.llm_provider == "cerebras":
+            generated = await generate_with_cerebras(
+                api_key=settings.cerebras_api_key,
+                base_url=settings.cerebras_base_url,
+                model=settings.cerebras_model,
+                question=payload.message,
+                sources=sources,
+            )
+            mode = f"cerebras:{settings.cerebras_model}" if generated else "local-grounded"
+        else:
+            generated, mode = await llm.generate(
+                question=payload.message,
+                sources=sources,
+            )
         answer = generated or synthesize_answer(payload.message, identified_people, sources)
-        mode = f"cerebras:{settings.cerebras_model}" if generated else "local-grounded"
         persisted = store.persist_chat_turn(
             owner_id,
             session_id=payload.session_id,

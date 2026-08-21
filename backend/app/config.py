@@ -32,6 +32,11 @@ class Settings:
     rerank_top_n: int
     chunk_size: int
     chunk_overlap: int
+    llm_provider: str = "cerebras"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = ""
+    llm_timeout_seconds: float = 30.0
 
     @classmethod
     def from_env(cls, data_dir: Path | None = None) -> "Settings":
@@ -47,16 +52,80 @@ class Settings:
             "CORS_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000",
         )
+
+        llm_provider = os.getenv("LLM_PROVIDER", "").strip().lower()
+        if not llm_provider:
+            llm_provider = "cerebras"
+
+        provider_defaults = {
+            "cerebras": {
+                "base_url": os.getenv("CEREBRAS_API_BASE_URL", "https://api.cerebras.ai/v1"),
+                "model": os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
+                "api_key": os.getenv("CEREBRAS_API_KEY", ""),
+            },
+            "openai": {
+                "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                "api_key": os.getenv("OPENAI_API_KEY", ""),
+            },
+            "ollama": {
+                "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+                "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
+                "api_key": os.getenv("OLLAMA_API_KEY", ""),
+            },
+            "groq": {
+                "base_url": os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+                "model": os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+                "api_key": os.getenv("GROQ_API_KEY", ""),
+            },
+            "gemini": {
+                "base_url": os.getenv(
+                    "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+                ),
+                "model": os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+                "api_key": os.getenv("GEMINI_API_KEY", ""),
+            },
+            "anthropic": {
+                "base_url": os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
+                "model": os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+                "api_key": os.getenv("ANTHROPIC_API_KEY", ""),
+            },
+        }
+
+        defaults = provider_defaults.get(llm_provider, {})
+        llm_api_key = (
+            os.getenv("LLM_API_KEY", "").strip()
+            or defaults.get("api_key", "").strip()
+        )
+        llm_base_url = (
+            os.getenv("LLM_BASE_URL", "").strip()
+            or defaults.get("base_url", "").strip()
+        ).rstrip("/")
+        llm_model = (
+            os.getenv("LLM_MODEL", "").strip()
+            or defaults.get("model", "").strip()
+        )
+        llm_timeout_seconds = float(os.getenv("LLM_TIMEOUT_SECONDS", "30"))
+
+        cerebras_api_key = os.getenv("CEREBRAS_API_KEY", "").strip() or (
+            llm_api_key if llm_provider == "cerebras" else ""
+        )
+        cerebras_base_url = os.getenv(
+            "CEREBRAS_API_BASE_URL",
+            llm_base_url if llm_provider == "cerebras" else "https://api.cerebras.ai/v1",
+        ).rstrip("/")
+        cerebras_model = os.getenv(
+            "CEREBRAS_MODEL",
+            llm_model if llm_provider == "cerebras" else "gpt-oss-120b",
+        )
+
         return cls(
             data_dir=resolved_data_dir,
             database_url=database_url,
             max_upload_bytes=int(os.getenv("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))),
-            cerebras_api_key=os.getenv("CEREBRAS_API_KEY", "").strip(),
-            cerebras_base_url=os.getenv(
-                "CEREBRAS_API_BASE_URL",
-                "https://api.cerebras.ai/v1",
-            ).rstrip("/"),
-            cerebras_model=os.getenv("CEREBRAS_MODEL", "gpt-oss-120b"),
+            cerebras_api_key=cerebras_api_key,
+            cerebras_base_url=cerebras_base_url,
+            cerebras_model=cerebras_model,
             cors_origins=tuple(origin.strip() for origin in origins.split(",") if origin.strip()),
             vector_search_enabled=os.getenv("VECTOR_SEARCH_ENABLED", "true").casefold()
             in {"1", "true", "yes", "on"},
@@ -82,4 +151,9 @@ class Settings:
             rerank_top_n=int(os.getenv("RERANK_TOP_N", "20")),
             chunk_size=int(os.getenv("CHUNK_SIZE", "800")),
             chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
+            llm_provider=llm_provider,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            llm_timeout_seconds=llm_timeout_seconds,
         )

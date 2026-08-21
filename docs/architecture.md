@@ -97,8 +97,10 @@ vector failure cannot erase accepted application data.
    combines their ranks and applies any explicit person boost.
 4. Every vector hit is revalidated against scoped relational rows. Filenames,
    pages, excerpts, and citations are read from the authoritative store.
-5. Cerebras optionally generates an answer from that evidence. Without an API
-   key, deterministic grounded synthesis preserves the same citation contract.
+5. The pluggable LLM provider layer (Cerebras, OpenAI, Gemini, Anthropic,
+   Ollama, Groq) generates an answer strictly grounded on retrieved evidence.
+   Without an API key or when offline, deterministic local grounded synthesis
+   preserves the exact same bracketed citation contract.
 6. The conversational turn and citation snapshot are committed together.
 
 ### Deletion and recovery
