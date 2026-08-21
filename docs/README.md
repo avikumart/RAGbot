@@ -9,6 +9,7 @@ Welcome to the Personagraph (RAGbot) documentation library. This directory conta
 ### 1. Product & Architecture
 - **[Product Overview](product.md)**: Value proposition, target use cases, core workflows, and privacy principles.
 - **[System Architecture](architecture.md)**: End-to-end design, trust boundaries, runtime topology, and invariant guarantees.
+- **[System Architecture Diagrams](system-diagram.md)**: Visual Mermaid component topologies, ingestion sequence diagrams, hybrid retrieval flows, and security trust zones.
 - **[Hybrid Retrieval Engine](retrieval-engine.md)**: Deep dive into the ingestion pipeline, FastEmbed dense retrieval, BM25 lexical search, Reciprocal Rank Fusion, and person boosting.
 
 ### 2. Component References
