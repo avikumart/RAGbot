@@ -3,8 +3,18 @@ import json
 
 import httpx
 
-from app.llm import generate_with_cerebras
-
+from app.config import Settings
+from app.llm import (
+    AnthropicProvider,
+    CerebrasProvider,
+    GeminiProvider,
+    LLMService,
+    OpenAICompatibleProvider,
+    create_llm_provider,
+    ensure_bracketed_citations,
+    format_source_context,
+    generate_with_cerebras,
+)
 
 SOURCES = [
     {
@@ -14,6 +24,22 @@ SOURCES = [
         "excerpt": "Jordan Lee owns the rollout plan.",
     }
 ]
+
+
+def test_format_source_context():
+    sources = [
+        {"index": 1, "filename": "doc1.txt", "page": 2, "excerpt": "Excerpt 1"},
+        {"index": 2, "filename": "doc2.txt", "page": None, "excerpt": "Excerpt 2"},
+    ]
+    formatted = format_source_context(sources)
+    assert "[1] doc1.txt, page 2\nExcerpt 1" in formatted
+    assert "[2] doc2.txt\nExcerpt 2" in formatted
+
+
+def test_ensure_bracketed_citations():
+    assert ensure_bracketed_citations("Jordan owns the plan [1].", SOURCES) == "Jordan owns the plan [1]."
+    assert ensure_bracketed_citations("Jordan owns the plan.", SOURCES) == "Jordan owns the plan.\n\n[1]"
+    assert ensure_bracketed_citations("Jordan owns the plan.", []) == "Jordan owns the plan."
 
 
 def test_cerebras_request_matches_chat_completions_contract():
@@ -40,10 +66,12 @@ def test_cerebras_request_matches_chat_completions_contract():
             )
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            return await generate_with_cerebras(
+            provider = CerebrasProvider(
                 api_key="test-api-key",
                 base_url="https://api.cerebras.ai/v1",
                 model="gpt-oss-120b",
+            )
+            return await provider.generate_response(
                 question="What does Jordan own?",
                 sources=SOURCES,
                 client=client,
@@ -52,7 +80,225 @@ def test_cerebras_request_matches_chat_completions_contract():
     assert asyncio.run(run_test()) == "Jordan owns it [1]."
 
 
-def test_cerebras_adds_source_markers_when_model_omits_them():
+def test_openai_compatible_provider_matches_contract():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url == "https://api.openai.com/v1/chat/completions"
+            assert request.headers["authorization"] == "Bearer openai-test-key"
+            payload = json.loads(request.content)
+            assert payload["model"] == "gpt-4o-mini"
+            assert payload["messages"][0]["role"] == "system"
+            assert payload["messages"][1]["role"] == "user"
+            assert "Jordan Lee owns the rollout plan." in payload["messages"][1]["content"]
+            assert payload["max_tokens"] == 1024
+            assert payload["temperature"] == 0.1
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "Jordan manages the rollout [1]."}}
+                    ]
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleProvider(
+                api_key="openai-test-key",
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+                provider_label="openai",
+            )
+            assert provider.mode_label == "openai:gpt-4o-mini"
+            return await provider.generate_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "Jordan manages the rollout [1]."
+
+
+def test_ollama_local_provider_without_api_key():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url == "http://localhost:11434/v1/chat/completions"
+            assert "authorization" not in request.headers
+            payload = json.loads(request.content)
+            assert payload["model"] == "llama3.2"
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "Offline local response [1]."}}
+                    ]
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleProvider(
+                api_key="",
+                base_url="http://localhost:11434/v1",
+                model="llama3.2",
+                provider_label="ollama",
+            )
+            assert provider.is_configured() is True
+            assert provider.mode_label == "ollama:llama3.2"
+            return await provider.generate_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "Offline local response [1]."
+
+
+def test_gemini_provider_matches_contract():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url == "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+            assert request.headers["x-goog-api-key"] == "gemini-test-key"
+            payload = json.loads(request.content)
+            assert "systemInstruction" in payload
+            assert payload["contents"][0]["role"] == "user"
+            assert "Jordan Lee owns the rollout plan." in payload["contents"][0]["parts"][0]["text"]
+            assert payload["generationConfig"]["temperature"] == 0.1
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": "Gemini response [1]."}]
+                            }
+                        }
+                    ]
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = GeminiProvider(
+                api_key="gemini-test-key",
+                base_url="https://generativelanguage.googleapis.com/v1beta",
+                model="gemini-1.5-flash",
+            )
+            assert provider.mode_label == "gemini:gemini-1.5-flash"
+            return await provider.generate_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "Gemini response [1]."
+
+
+def test_anthropic_provider_matches_contract():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url == "https://api.anthropic.com/v1/messages"
+            assert request.headers["x-api-key"] == "anthropic-test-key"
+            assert request.headers["anthropic-version"] == "2023-06-01"
+            payload = json.loads(request.content)
+            assert payload["model"] == "claude-3-5-haiku-latest"
+            assert payload["max_tokens"] == 1024
+            assert "untrusted reference text" in payload["system"]
+            assert payload["messages"][0]["role"] == "user"
+            assert "Jordan Lee owns the rollout plan." in payload["messages"][0]["content"]
+            return httpx.Response(
+                200,
+                json={
+                    "content": [
+                        {"type": "text", "text": "Claude response [1]."}
+                    ]
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = AnthropicProvider(
+                api_key="anthropic-test-key",
+                base_url="https://api.anthropic.com/v1",
+                model="claude-3-5-haiku-latest",
+            )
+            assert provider.mode_label == "anthropic:claude-3-5-haiku-latest"
+            return await provider.generate_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "Claude response [1]."
+
+
+def test_create_llm_provider_factory(tmp_path, monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
+    settings = Settings.from_env(tmp_path)
+    provider = create_llm_provider(settings)
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.provider_name == "openai"
+    assert provider.model_name == "gpt-4o"
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    settings = Settings.from_env(tmp_path)
+    provider = create_llm_provider(settings)
+    assert isinstance(provider, GeminiProvider)
+    assert provider.provider_name == "gemini"
+
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    settings = Settings.from_env(tmp_path)
+    provider = create_llm_provider(settings)
+    assert isinstance(provider, AnthropicProvider)
+    assert provider.provider_name == "anthropic"
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    settings = Settings.from_env(tmp_path)
+    provider = create_llm_provider(settings)
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.provider_name == "ollama"
+
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    settings = Settings.from_env(tmp_path)
+    assert create_llm_provider(settings) is None
+
+
+def test_llm_service_generate():
+    async def run_test():
+        # Service with no provider
+        service_none = LLMService(None)
+        assert service_none.is_configured is False
+        answer, mode = await service_none.generate(question="test", sources=SOURCES)
+        assert answer is None
+        assert mode == "local-grounded"
+
+        # Service with provider
+        transport = httpx.MockTransport(
+            lambda _: httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "Answer with citation [1]"}}]},
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            provider = CerebrasProvider(
+                api_key="key",
+                base_url="https://api.cerebras.ai/v1",
+                model="gpt-oss-120b",
+            )
+            service = LLMService(provider)
+            assert service.is_configured is True
+            answer, mode = await service.generate(
+                question="test", sources=SOURCES, client=client
+            )
+            assert answer == "Answer with citation [1]"
+            assert mode == "cerebras:gpt-oss-120b"
+
+    asyncio.run(run_test())
+
+
+def test_cerebras_backward_compatible_helper():
     async def run_test() -> str | None:
         transport = httpx.MockTransport(
             lambda _: httpx.Response(
@@ -72,40 +318,3 @@ def test_cerebras_adds_source_markers_when_model_omits_them():
 
     assert asyncio.run(run_test()) == "Jordan owns the rollout plan.\n\n[1]"
 
-
-def test_cerebras_is_skipped_without_key_or_sources():
-    without_key = generate_with_cerebras(
-        api_key="",
-        base_url="https://api.cerebras.ai/v1",
-        model="gpt-oss-120b",
-        question="What does Jordan own?",
-        sources=SOURCES,
-    )
-    without_sources = generate_with_cerebras(
-        api_key="test-api-key",
-        base_url="https://api.cerebras.ai/v1",
-        model="gpt-oss-120b",
-        question="What does Jordan own?",
-        sources=[],
-    )
-
-    assert asyncio.run(without_key) is None
-    assert asyncio.run(without_sources) is None
-
-
-def test_cerebras_failure_falls_back_cleanly():
-    async def run_test() -> str | None:
-        transport = httpx.MockTransport(
-            lambda _: httpx.Response(401, json={"message": "invalid API key"})
-        )
-        async with httpx.AsyncClient(transport=transport) as client:
-            return await generate_with_cerebras(
-                api_key="invalid-key",
-                base_url="https://api.cerebras.ai/v1",
-                model="gpt-oss-120b",
-                question="What does Jordan own?",
-                sources=SOURCES,
-                client=client,
-            )
-
-    assert asyncio.run(run_test()) is None

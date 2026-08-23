@@ -9,9 +9,17 @@ services:
       PERSONA_DATA_DIR: /data
       DATABASE_URL: postgresql://${POSTGRES_USER:-personagraph}:${POSTGRES_PASSWORD:-personagraph}@postgres:5432/${POSTGRES_DB:-personagraph}
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      LLM_PROVIDER: ${LLM_PROVIDER:-cerebras}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
       CEREBRAS_API_KEY: ${CEREBRAS_API_KEY:-}
       CEREBRAS_API_BASE_URL: ${CEREBRAS_API_BASE_URL:-https://api.cerebras.ai/v1}
       CEREBRAS_MODEL: ${CEREBRAS_MODEL:-gpt-oss-120b}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       VECTOR_SEARCH_ENABLED: ${VECTOR_SEARCH_ENABLED:-true}
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-personagraph_chunks}

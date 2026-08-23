@@ -80,6 +80,16 @@ function subjectDescription(subject: PersonRecord) {
 function answerModeLabel(mode: string) {
   if (mode === "local-grounded") return "Local grounded synthesis";
   if (mode.startsWith("cerebras:")) return `Cerebras · ${mode.slice("cerebras:".length)}`;
+  if (mode.startsWith("openai:")) return `OpenAI · ${mode.slice("openai:".length)}`;
+  if (mode.startsWith("gemini:")) return `Gemini · ${mode.slice("gemini:".length)}`;
+  if (mode.startsWith("anthropic:")) return `Anthropic · ${mode.slice("anthropic:".length)}`;
+  if (mode.startsWith("ollama:")) return `Ollama · ${mode.slice("ollama:".length)}`;
+  if (mode.startsWith("groq:")) return `Groq · ${mode.slice("groq:".length)}`;
+  if (mode.includes(":")) {
+    const [provider, ...modelParts] = mode.split(":");
+    const capitalized = provider.charAt(0).toUpperCase() + provider.slice(1);
+    return `${capitalized} · ${modelParts.join(":")}`;
+  }
   return mode;
 }
 

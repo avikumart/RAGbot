@@ -34,8 +34,9 @@ Uploads are extracted into pages and chunks, then PostgreSQL is committed before
 docker compose run --rm api python -m app.vector_admin backfill
 ```
 
-Semantic retrieval uses local FastEmbed with `BAAI/bge-small-en-v1.5` by default. Qdrant and lexical candidates are combined with deterministic reciprocal-rank fusion; cited text is always read from PostgreSQL. Set `CEREBRAS_API_KEY` to enable optional generated answers. Without it, the API returns deterministic grounded synthesis.
+Semantic retrieval uses local FastEmbed with `BAAI/bge-small-en-v1.5` by default. Qdrant and lexical candidates are combined with deterministic reciprocal-rank fusion; cited text is always read from PostgreSQL. Configure `LLM_PROVIDER` (`cerebras`, `openai`, `gemini`, `anthropic`, `ollama`, `groq`) and corresponding API credentials/endpoints to enable generated answers. Without configured credentials, the API returns deterministic grounded synthesis.
 
 ## Configuration
 
-The primary settings are defined in `backend/app/config.py` and documented in `.env.example`: data directory, CORS origins, vector service, embedding model and limits, Cerebras, and proxy authentication. Keep the configured embedding dimensions aligned with the selected model. Changing models requires a new `QDRANT_COLLECTION` followed by backfill.
+The primary settings are defined in `backend/app/config.py` and documented in `.env.example`: data directory, CORS origins, vector service, embedding model and limits, pluggable LLM provider settings, and proxy authentication. Keep the configured embedding dimensions aligned with the selected model. Changing models requires a new `QDRANT_COLLECTION` followed by backfill.
+

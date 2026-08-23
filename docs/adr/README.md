@@ -9,6 +9,8 @@ part of the maintained project documentation and are reviewed with code.
 | ADR | Status | Decision |
 | --- | --- | --- |
 | [0001](0001-authoritative-relational-store.md) | Accepted | Keep application records authoritative in the relational store and vectors rebuildable |
+| [0002](0002-pluggable-llm-provider-architecture.md) | Accepted | Pluggable LLM provider architecture for retrieval summarization |
+
 
 ## Workflow
 
