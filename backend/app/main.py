@@ -299,8 +299,13 @@ def create_app(
     async def chat(payload: ChatRequest, request: Request) -> dict:
         owner_id = request_owner(request, settings)
         client_message_id = payload.client_message_id or uuid4().hex
+        history: list[dict] = []
+        scoped_person = payload.person
+        scoped_doc_ids = payload.document_ids
+
         if payload.session_id:
-            if not store.get_chat_session(owner_id, payload.session_id):
+            session = store.get_chat_session(owner_id, payload.session_id)
+            if not session:
                 raise HTTPException(status_code=404, detail="Conversation not found.")
             persisted = store.find_chat_turn(
                 owner_id, payload.session_id, client_message_id
@@ -315,23 +320,31 @@ def create_app(
                     "user_message": persisted["user_message"],
                     "assistant_message": assistant,
                 }
+            history = session.get("messages", [])[-6:]
+            if scoped_person is None and session.get("person"):
+                scoped_person = session.get("person")
+            if scoped_doc_ids is None and session.get("document_ids"):
+                scoped_doc_ids = session.get("document_ids")
+
         if not store.list_documents():
             raise HTTPException(status_code=409, detail="Upload a document before asking a question.")
         identified_people, sources, retrieval_mode = hybrid_retrieve(
             store,
             payload.message,
-            payload.document_ids,
-            payload.person,
+            scoped_doc_ids,
+            scoped_person,
             payload.top_k,
             vector_service=vectors,
             lexical_limit=settings.lexical_candidate_limit,
             vector_limit=settings.vector_candidate_limit,
             reranker=RerankerService(enabled=settings.reranker_enabled, model_name=settings.reranker_model),
+            history=history,
         )
         if llm_service is not None:
             generated, mode = await llm.generate(
                 question=payload.message,
                 sources=sources,
+                history=history,
             )
         elif settings.llm_provider == "cerebras":
             generated = await generate_with_cerebras(
@@ -340,12 +353,14 @@ def create_app(
                 model=settings.cerebras_model,
                 question=payload.message,
                 sources=sources,
+                history=history,
             )
             mode = f"cerebras:{settings.cerebras_model}" if generated else "local-grounded"
         else:
             generated, mode = await llm.generate(
                 question=payload.message,
                 sources=sources,
+                history=history,
             )
         answer = generated or synthesize_answer(payload.message, identified_people, sources)
         persisted = store.persist_chat_turn(

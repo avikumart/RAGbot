@@ -17,6 +17,7 @@ Rules:
 - If the evidence is insufficient, say so plainly.
 - Cite every factual claim with bracketed source numbers like [1].
 - Keep the answer concise and never invent relationships, dates, or roles.
+- When prior conversational turns are present, maintain continuity while grounding all factual claims strictly in the supplied excerpts.
 """
 
 
@@ -79,6 +80,7 @@ class LLMProvider(ABC):
         *,
         question: str,
         context: str,
+        history: list[dict] | None = None,
     ) -> str | None:
         """Performs the provider-specific HTTP request and returns parsed text content."""
         ...
@@ -88,6 +90,7 @@ class LLMProvider(ABC):
         *,
         question: str,
         sources: list[dict],
+        history: list[dict] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> str | None:
         """Formats context, dispatches request, and guarantees source citations on success."""
@@ -104,12 +107,24 @@ class LLMProvider(ABC):
 
         try:
             if client is not None:
-                answer = await self._send_request(client, question=question, context=context)
+                try:
+                    answer = await self._send_request(
+                        client, question=question, context=context, history=history
+                    )
+                except TypeError:
+                    answer = await self._send_request(
+                        client, question=question, context=context
+                    )
             else:
                 async with httpx.AsyncClient(timeout=self.timeout) as owned_client:
-                    answer = await self._send_request(
-                        owned_client, question=question, context=context
-                    )
+                    try:
+                        answer = await self._send_request(
+                            owned_client, question=question, context=context, history=history
+                        )
+                    except TypeError:
+                        answer = await self._send_request(
+                            owned_client, question=question, context=context
+                        )
 
             if answer:
                 return ensure_bracketed_citations(answer, sources)
@@ -140,7 +155,18 @@ class CerebrasProvider(LLMProvider):
         *,
         question: str,
         context: str,
+        history: list[dict] | None = None,
     ) -> str | None:
+        messages: list[dict] = [
+            {"role": "developer", "content": SYSTEM_PROMPT}
+        ]
+        if history:
+            for turn in history:
+                role = "assistant" if turn.get("role") == "assistant" else "user"
+                messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append(
+            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"}
+        )
         response = await client.post(
             f"{self.base_url}/chat/completions",
             headers={
@@ -149,10 +175,7 @@ class CerebrasProvider(LLMProvider):
             },
             json={
                 "model": self.model,
-                "messages": [
-                    {"role": "developer", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
-                ],
+                "messages": messages,
                 "max_completion_tokens": 1024,
                 "reasoning_effort": "low",
                 "stream": False,
@@ -203,20 +226,29 @@ class OpenAICompatibleProvider(LLMProvider):
         *,
         question: str,
         context: str,
+        history: list[dict] | None = None,
     ) -> str | None:
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
+
+        messages: list[dict] = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+        if history:
+            for turn in history:
+                role = "assistant" if turn.get("role") == "assistant" else "user"
+                messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append(
+            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"}
+        )
 
         response = await client.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
             json={
                 "model": self.model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"},
-                ],
+                "messages": messages,
                 "temperature": 0.1,
                 "max_tokens": 1024,
                 "stream": False,
@@ -261,22 +293,29 @@ class GeminiProvider(LLMProvider):
         *,
         question: str,
         context: str,
+        history: list[dict] | None = None,
     ) -> str | None:
         endpoint = f"{self.base_url}/models/{self.model}:generateContent"
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": self.api_key,
         }
+        contents: list[dict] = []
+        if history:
+            for turn in history:
+                role = "model" if turn.get("role") == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": turn.get("content", "")}]})
+        contents.append(
+            {
+                "role": "user",
+                "parts": [{"text": f"Sources:\n{context}\n\nQuestion: {question}"}],
+            }
+        )
         body = {
             "systemInstruction": {
                 "parts": [{"text": SYSTEM_PROMPT}]
             },
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"Sources:\n{context}\n\nQuestion: {question}"}],
-                }
-            ],
+            "contents": contents,
             "generationConfig": {
                 "temperature": 0.1,
                 "maxOutputTokens": 1024,
@@ -327,23 +366,30 @@ class AnthropicProvider(LLMProvider):
         *,
         question: str,
         context: str,
+        history: list[dict] | None = None,
     ) -> str | None:
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        messages: list[dict] = []
+        if history:
+            for turn in history:
+                role = "assistant" if turn.get("role") == "assistant" else "user"
+                messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Sources:\n{context}\n\nQuestion: {question}",
+            }
+        )
         body = {
             "model": self.model,
             "max_tokens": 1024,
             "temperature": 0.1,
             "system": SYSTEM_PROMPT,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": f"Sources:\n{context}\n\nQuestion: {question}",
-                }
-            ],
+            "messages": messages,
         }
         response = await client.post(f"{self.base_url}/messages", headers=headers, json=body)
         response.raise_for_status()
@@ -432,6 +478,7 @@ class LLMService:
         *,
         question: str,
         sources: list[dict],
+        history: list[dict] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> tuple[str | None, str]:
         """Generates answer using the configured provider.
@@ -443,7 +490,7 @@ class LLMService:
             return None, "local-grounded"
 
         answer = await self._provider.generate_response(
-            question=question, sources=sources, client=client
+            question=question, sources=sources, history=history, client=client
         )
         if answer:
             return answer, self._provider.mode_label
@@ -457,8 +504,12 @@ async def generate_with_cerebras(
     model: str,
     question: str,
     sources: list[dict],
+    history: list[dict] | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> str | None:
     """Backward-compatible helper function for Cerebras generation."""
     provider = CerebrasProvider(api_key=api_key, base_url=base_url, model=model)
-    return await provider.generate_response(question=question, sources=sources, client=client)
+    return await provider.generate_response(
+        question=question, sources=sources, history=history, client=client
+    )
+

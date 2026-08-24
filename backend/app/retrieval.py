@@ -18,6 +18,15 @@ STOP_WORDS = {
     "this", "those", "was", "were", "what", "when", "where", "which", "who", "why", "will",
     "with", "would", "you", "your",
 }
+PRONOUN_TOKENS = {
+    "he", "him", "his", "she", "her", "hers", "they", "them", "their", "theirs",
+    "who", "whom", "whose", "it", "its",
+}
+FOLLOWUP_INDICATORS = {
+    "what else", "tell me more", "anything else", "what about", "how about",
+    "more details", "what other", "did they", "did he", "did she", "when did",
+    "where did", "why did", "how did", "who was", "who is",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -34,7 +43,13 @@ def tokenize(text: str) -> list[str]:
     ]
 
 
-def identify_people(question: str, known_people: list[dict], explicit: str | None) -> list[str]:
+def identify_people(
+    question: str,
+    known_people: list[dict],
+    explicit: str | None = None,
+    history: list[dict] | None = None,
+) -> list[str]:
+    """Identifies person names mentioned in the question or prior conversational context."""
     if explicit:
         return [explicit]
     folded_question = question.casefold()
@@ -48,10 +63,83 @@ def identify_people(question: str, known_people: list[dict], explicit: str | Non
         if person["name"].split()[0].casefold() in question_tokens
     ]
     first_names = Counter(name.split()[0].casefold() for name in first_name_matches)
-    return [
+    matches = [
         name for name in first_name_matches
         if first_names[name.split()[0].casefold()] == 1
     ]
+    if matches:
+        return matches
+
+    # Resolve from recent conversational history (most recent first)
+    if history:
+        for turn in reversed(history):
+            content = turn.get("content", "").casefold()
+            hist_exact = [
+                person["name"] for person in known_people
+                if person["normalized"] in content
+            ]
+            if hist_exact:
+                return hist_exact
+            hist_tokens = set(tokenize(content))
+            hist_fn_matches = [
+                person["name"] for person in known_people
+                if person["name"].split()[0].casefold() in hist_tokens
+            ]
+            hist_fn = Counter(name.split()[0].casefold() for name in hist_fn_matches)
+            hist_found = [
+                name for name in hist_fn_matches
+                if hist_fn[name.split()[0].casefold()] == 1
+            ]
+            if hist_found:
+                return hist_found
+
+    return []
+
+
+def reformulate_query(
+    question: str,
+    history: list[dict] | None = None,
+    known_people: list[dict] | None = None,
+    explicit_person: str | None = None,
+) -> tuple[str, list[str]]:
+    """Synthesizes a standalone retrieval query and identifies contextually active people."""
+    people = identify_people(
+        question, known_people or [], explicit=explicit_person, history=history
+    )
+
+    if not history:
+        return question, people
+
+    folded_question = question.casefold()
+    tokens = set(tokenize(question))
+
+    has_pronoun = bool(tokens & PRONOUN_TOKENS)
+    has_followup = any(phrase in folded_question for phrase in FOLLOWUP_INDICATORS)
+    person_in_question = any(p.casefold() in folded_question for p in people)
+
+    needs_reformulation = has_pronoun or has_followup or (people and not person_in_question)
+
+    if not needs_reformulation:
+        return question, people
+
+    subject_prefix = " ".join(people) if people else ""
+    context_keywords: list[str] = []
+    if len(tokens) <= 3:
+        for turn in reversed(history):
+            if turn.get("role") == "user":
+                prior_tokens = [
+                    t for t in tokenize(turn.get("content", ""))
+                    if t not in PRONOUN_TOKENS and t not in STOP_WORDS
+                ]
+                context_keywords = prior_tokens[:3]
+                break
+
+    context_str = " ".join(dict.fromkeys([subject_prefix, *context_keywords]).keys()).strip()
+    if context_str:
+        standalone = f"{context_str} {question}".strip()
+        return standalone, people
+
+    return question, people
 
 
 def lexical_candidates(
@@ -141,19 +229,24 @@ def hybrid_retrieve(
     lexical_limit: int = 20,
     vector_limit: int = 20,
     reranker: RerankerService | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[list[str], list[dict], str]:
     chunks = store.get_chunks(document_ids)
     known_people = store.list_people(document_ids)
-    people = identify_people(question, known_people, explicit_person)
+    standalone_query, people = reformulate_query(
+        question, history=history, known_people=known_people, explicit_person=explicit_person
+    )
     if not chunks:
         return people, [], "lexical"
 
-    lexical = lexical_candidates(chunks, question, people, lexical_limit, store=store, document_ids=document_ids)
+    lexical = lexical_candidates(
+        chunks, standalone_query, people, lexical_limit, store=store, document_ids=document_ids
+    )
     vector: list[RankedChunk] = []
     retrieval_mode = "lexical"
     if vector_service and vector_service.enabled:
         try:
-            raw_vector = vector_service.search(question, document_ids, vector_limit)
+            raw_vector = vector_service.search(standalone_query, document_ids, vector_limit)
             # Qdrant is derived state: only candidates still present in scoped PostgreSQL
             # rows are eligible for answers and citations.
             valid = {
@@ -188,7 +281,7 @@ def hybrid_retrieve(
         key=lambda item: (-item[0], int(item[1]["id"])),
     )
     if reranker is not None:
-        fused_candidates = reranker.rerank(question, fused_candidates)
+        fused_candidates = reranker.rerank(standalone_query, fused_candidates)
     chosen = fused_candidates[:top_k]
     if not chosen:
         return people, [], retrieval_mode
