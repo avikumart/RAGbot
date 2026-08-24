@@ -232,8 +232,8 @@ def test_chat_uses_openai_provider_when_configured(tmp_path, monkeypatch):
         def is_configured(self) -> bool:
             return provider.is_configured()
 
-        async def _send_request(self, client, *, question, context):
-            return await provider._send_request(client_mock, question=question, context=context)
+        async def _send_request(self, client, *, question, context, history=None):
+            return await provider._send_request(client_mock, question=question, context=context, history=history)
 
     app = create_app(tmp_path, llm_service=LLMService(TransportProvider()))
     with TestClient(app) as client:
@@ -528,3 +528,96 @@ def test_delete_succeeds_and_records_cleanup_when_unlink_fails(
         assert cleanup["attempt_count"] == 1
         assert cleanup["last_error"] == "simulated API unlink failure"
         assert "pending cleanup retained" in caplog.text
+
+
+def test_multi_turn_chat_followup_resolves_pronouns_and_preserves_session_context(tmp_path):
+    client, document = client_with_sample(tmp_path)
+    try:
+        # Turn 1: Ask about Jordan Lee
+        first_resp = client.post(
+            "/api/chat",
+            json={"message": "What does Jordan Lee own?", "document_ids": [document["id"]]},
+        )
+        assert first_resp.status_code == 200
+        first_payload = first_resp.json()
+        session_id = first_payload["session_id"]
+        assert first_payload["people"] == ["Jordan Lee"]
+        assert "rollout plan" in first_payload["answer"]
+
+        # Turn 2: Follow-up question with pronoun "they" in the same session
+        second_resp = client.post(
+            "/api/chat",
+            json={
+                "session_id": session_id,
+                "message": "When did they join the rollout?",
+            },
+        )
+        assert second_resp.status_code == 200
+        second_payload = second_resp.json()
+        assert second_payload["session_id"] == session_id
+        # Person should be resolved from previous conversation context
+        assert second_payload["people"] == ["Jordan Lee"]
+        assert len(second_payload["sources"]) > 0
+
+        # Verify session message history
+        session_resp = client.get(f"/api/sessions/{session_id}")
+        assert session_resp.status_code == 200
+        session_data = session_resp.json()
+        assert len(session_data["messages"]) == 4
+        assert session_data["messages"][0]["role"] == "user"
+        assert session_data["messages"][1]["role"] == "assistant"
+        assert session_data["messages"][2]["role"] == "user"
+        assert session_data["messages"][3]["role"] == "assistant"
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_multi_turn_chat_with_llm_receives_prior_turns(tmp_path):
+    received_histories = []
+
+    class MockHistoryProvider(LLMProvider):
+        @property
+        def provider_name(self) -> str:
+            return "history-test"
+
+        @property
+        def model_name(self) -> str:
+            return "v1"
+
+        def is_configured(self) -> bool:
+            return True
+
+        async def _send_request(self, client, *, question, context, history=None):
+            received_histories.append(list(history or []))
+            return f"Answer for '{question}' [1]."
+
+    custom_service = LLMService(MockHistoryProvider())
+    app = create_app(tmp_path, llm_service=custom_service)
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents",
+            files={"file": ("people-notes.txt", SAMPLE, "text/plain")},
+        ).json()
+
+        # Turn 1
+        t1 = client.post(
+            "/api/chat",
+            json={"message": "What does Jordan Lee own?", "document_ids": [upload["id"]]},
+        ).json()
+        session_id = t1["session_id"]
+        assert len(received_histories) == 1
+        assert received_histories[0] == []  # No prior history on first turn
+
+        # Turn 2 in same session
+        t2 = client.post(
+            "/api/chat",
+            json={"session_id": session_id, "message": "What else do they manage?"},
+        ).json()
+        assert t2["session_id"] == session_id
+        assert len(received_histories) == 2
+        # Prior turn should be in history passed to provider
+        assert len(received_histories[1]) == 2
+        assert received_histories[1][0]["role"] == "user"
+        assert received_histories[1][0]["content"] == "What does Jordan Lee own?"
+        assert received_histories[1][1]["role"] == "assistant"
+

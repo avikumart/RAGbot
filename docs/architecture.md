@@ -93,15 +93,17 @@ vector failure cannot erase accepted application data.
 
 1. The frontend signs the owner identity before forwarding chat/session calls.
 2. The API scopes documents and sessions to that owner.
-3. Lexical and semantic retrieval produce candidates; reciprocal-rank fusion
-   combines their ranks and applies any explicit person boost.
-4. Every vector hit is revalidated against scoped relational rows. Filenames,
+3. For existing sessions, recent conversational history is loaded to resolve pronouns,
+   anaphora, and active topic entities via light query reformulation into standalone retrieval queries.
+4. Lexical and semantic retrieval produce candidates; reciprocal-rank fusion
+   combines their ranks and applies any explicit or resolved person boost.
+5. Every vector hit is revalidated against scoped relational rows. Filenames,
    pages, excerpts, and citations are read from the authoritative store.
-5. The pluggable LLM provider layer (Cerebras, OpenAI, Gemini, Anthropic,
-   Ollama, Groq) generates an answer strictly grounded on retrieved evidence.
-   Without an API key or when offline, deterministic local grounded synthesis
-   preserves the exact same bracketed citation contract.
-6. The conversational turn and citation snapshot are committed together.
+6. The pluggable LLM provider layer (Cerebras, OpenAI, Gemini, Anthropic,
+   Ollama, Groq) receives conversational turns and generates an answer strictly
+   grounded on retrieved evidence. Without an API key or when offline,
+   deterministic local grounded synthesis preserves the exact same citation contract.
+7. The conversational turn and citation snapshot are committed together.
 
 ### Deletion and recovery
 

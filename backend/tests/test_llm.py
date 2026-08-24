@@ -298,6 +298,170 @@ def test_llm_service_generate():
     asyncio.run(run_test())
 
 
+def test_cerebras_passes_multi_turn_history():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            messages = payload["messages"]
+            assert len(messages) == 4
+            assert messages[0]["role"] == "developer"
+            assert messages[1]["role"] == "user"
+            assert messages[1]["content"] == "Who owns the rollout plan?"
+            assert messages[2]["role"] == "assistant"
+            assert messages[2]["content"] == "Jordan Lee owns the rollout plan [1]."
+            assert messages[3]["role"] == "user"
+            assert "When did they join?" in messages[3]["content"]
+            assert "Sources:\n" in messages[3]["content"]
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "Jordan joined in 2023 [1]."}}
+                    ]
+                },
+            )
+
+        history = [
+            {"role": "user", "content": "Who owns the rollout plan?"},
+            {"role": "assistant", "content": "Jordan Lee owns the rollout plan [1]."},
+        ]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = CerebrasProvider(
+                api_key="test-api-key",
+                base_url="https://api.cerebras.ai/v1",
+                model="gpt-oss-120b",
+            )
+            return await provider.generate_response(
+                question="When did they join?",
+                sources=SOURCES,
+                history=history,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "Jordan joined in 2023 [1]."
+
+
+def test_openai_compatible_passes_multi_turn_history():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            messages = payload["messages"]
+            assert len(messages) == 4
+            assert messages[0]["role"] == "system"
+            assert messages[1]["role"] == "user"
+            assert messages[2]["role"] == "assistant"
+            assert messages[3]["role"] == "user"
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "OpenAI history answer [1]."}}
+                    ]
+                },
+            )
+
+        history = [
+            {"role": "user", "content": "Who owns the rollout plan?"},
+            {"role": "assistant", "content": "Jordan Lee owns the rollout plan [1]."},
+        ]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleProvider(
+                api_key="sk-test",
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+            )
+            return await provider.generate_response(
+                question="When did they join?",
+                sources=SOURCES,
+                history=history,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "OpenAI history answer [1]."
+
+
+def test_gemini_passes_multi_turn_history():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            contents = payload["contents"]
+            assert len(contents) == 3
+            assert contents[0]["role"] == "user"
+            assert contents[0]["parts"][0]["text"] == "Who owns the rollout plan?"
+            assert contents[1]["role"] == "model"
+            assert contents[1]["parts"][0]["text"] == "Jordan Lee owns the rollout plan [1]."
+            assert contents[2]["role"] == "user"
+            assert "When did they join?" in contents[2]["parts"][0]["text"]
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {"content": {"parts": [{"text": "Gemini history answer [1]."}]}}
+                    ]
+                },
+            )
+
+        history = [
+            {"role": "user", "content": "Who owns the rollout plan?"},
+            {"role": "assistant", "content": "Jordan Lee owns the rollout plan [1]."},
+        ]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = GeminiProvider(
+                api_key="gemini-key",
+                base_url="https://generativelanguage.googleapis.com/v1beta",
+                model="gemini-1.5-flash",
+            )
+            return await provider.generate_response(
+                question="When did they join?",
+                sources=SOURCES,
+                history=history,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "Gemini history answer [1]."
+
+
+def test_anthropic_passes_multi_turn_history():
+    async def run_test() -> str | None:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            messages = payload["messages"]
+            assert len(messages) == 3
+            assert messages[0]["role"] == "user"
+            assert messages[0]["content"] == "Who owns the rollout plan?"
+            assert messages[1]["role"] == "assistant"
+            assert messages[1]["content"] == "Jordan Lee owns the rollout plan [1]."
+            assert messages[2]["role"] == "user"
+            assert "When did they join?" in messages[2]["content"]
+            return httpx.Response(
+                200,
+                json={
+                    "content": [
+                        {"type": "text", "text": "Claude history answer [1]."}
+                    ]
+                },
+            )
+
+        history = [
+            {"role": "user", "content": "Who owns the rollout plan?"},
+            {"role": "assistant", "content": "Jordan Lee owns the rollout plan [1]."},
+        ]
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = AnthropicProvider(
+                api_key="anthropic-key",
+                base_url="https://api.anthropic.com/v1",
+                model="claude-3-5-haiku-latest",
+            )
+            return await provider.generate_response(
+                question="When did they join?",
+                sources=SOURCES,
+                history=history,
+                client=client,
+            )
+
+    assert asyncio.run(run_test()) == "Claude history answer [1]."
+
+
 def test_cerebras_backward_compatible_helper():
     async def run_test() -> str | None:
         transport = httpx.MockTransport(
@@ -317,4 +481,5 @@ def test_cerebras_backward_compatible_helper():
             )
 
     assert asyncio.run(run_test()) == "Jordan owns the rollout plan.\n\n[1]"
+
 

@@ -34,7 +34,7 @@ Uploads are extracted into pages and chunks, then PostgreSQL is committed before
 docker compose run --rm api python -m app.vector_admin backfill
 ```
 
-Semantic retrieval uses local FastEmbed with `BAAI/bge-small-en-v1.5` by default. Qdrant and lexical candidates are combined with deterministic reciprocal-rank fusion; cited text is always read from PostgreSQL. Configure `LLM_PROVIDER` (`cerebras`, `openai`, `gemini`, `anthropic`, `ollama`, `groq`) and corresponding API credentials/endpoints to enable generated answers. Without configured credentials, the API returns deterministic grounded synthesis.
+Semantic retrieval uses local FastEmbed with `BAAI/bge-small-en-v1.5` by default. Qdrant and lexical candidates are combined with deterministic reciprocal-rank fusion; cited text is always read from PostgreSQL. For multi-turn conversations, pronouns and anaphora are resolved via light query reformulation into standalone retrieval queries, and prior turns are provided to the LLM context. Configure `LLM_PROVIDER` (`cerebras`, `openai`, `gemini`, `anthropic`, `ollama`, `groq`) and corresponding API credentials/endpoints to enable generated answers. Without configured credentials, the API returns deterministic grounded synthesis.
 
 ## Configuration
 
