@@ -2,11 +2,10 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { DocumentLibrary } from "@/components/document-library";
-import { api } from "@/lib/api";
+import { api, streamChat } from "@/lib/api";
 import type {
   ChatMessage,
   ChatRequest,
-  ChatResponse,
   ChatSession,
   DocumentRecord,
   PersonRecord,
@@ -306,6 +305,7 @@ export default function Home() {
   async function submitMessage(message: string, clientMessageId = crypto.randomUUID()) {
     if (thinking || !documents.length) return;
     const optimistic: Message = { id: clientMessageId, role: "user", content: message, clientMessageId, status: "pending" };
+    const assistantPlaceholderId = crypto.randomUUID();
     setMessages((current) => current.some((item) => item.clientMessageId === clientMessageId)
       ? current.map((item) => item.clientMessageId === clientMessageId ? { ...item, status: "pending" } : item)
       : [...current, optimistic]);
@@ -332,23 +332,93 @@ export default function Home() {
         session_id: sessionId,
         client_message_id: clientMessageId,
       };
-      const response = await api<ChatResponse>("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(request),
-      });
-      setMessages((current) => [
-        ...current.filter((item) => item.clientMessageId !== clientMessageId),
-        asMessage(response.user_message),
-        asMessage(response.assistant_message),
-      ]);
-      setActiveSessionId(response.session_id);
-      setSessions((current) => {
-        const next = { id: response.session_id, topic: response.topic, document_ids: request.document_ids ?? [], person: request.person ?? null, created_at: response.user_message.created_at, updated_at: response.assistant_message.created_at };
-        return [next, ...current.filter((session) => session.id !== next.id)];
+      await streamChat(request, {
+        onMetadata: (meta) => {
+          setMessages((current) => {
+            const existing = current.find((item) => item.id === assistantPlaceholderId);
+            if (existing) {
+              return current.map((item) =>
+                item.id === assistantPlaceholderId
+                  ? { ...item, sources: meta.sources, mode: meta.mode, retrievalMode: meta.retrieval_mode }
+                  : item
+              );
+            }
+            const newAssistant: Message = {
+              id: assistantPlaceholderId,
+              role: "assistant",
+              content: "",
+              sources: meta.sources,
+              mode: meta.mode,
+              retrievalMode: meta.retrieval_mode,
+              status: "pending",
+            };
+            return [...current, newAssistant];
+          });
+        },
+        onToken: (delta) => {
+          setMessages((current) => {
+            const existing = current.find((item) => item.id === assistantPlaceholderId);
+            if (existing) {
+              return current.map((item) =>
+                item.id === assistantPlaceholderId
+                  ? { ...item, content: item.content + delta }
+                  : item
+              );
+            }
+            const newAssistant: Message = {
+              id: assistantPlaceholderId,
+              role: "assistant",
+              content: delta,
+              sources: [],
+              mode: null,
+              retrievalMode: null,
+              status: "pending",
+            };
+            return [...current, newAssistant];
+          });
+        },
+        onComplete: (data) => {
+          setMessages((current) => [
+            ...current.filter((item) => item.clientMessageId !== clientMessageId && item.id !== assistantPlaceholderId),
+            asMessage(data.user_message),
+            asMessage(data.assistant_message),
+          ]);
+          setActiveSessionId(data.session_id);
+          setSessions((current) => {
+            const next = {
+              id: data.session_id,
+              topic: data.topic,
+              document_ids: request.document_ids ?? [],
+              person: request.person ?? null,
+              created_at: data.user_message.created_at,
+              updated_at: data.assistant_message.created_at,
+            };
+            return [next, ...current.filter((session) => session.id !== next.id)];
+          });
+        },
+        onError: (err) => {
+          setMessages((current) =>
+            current
+              .filter((item) => item.id !== assistantPlaceholderId)
+              .map((item) =>
+                item.clientMessageId === clientMessageId
+                  ? { ...item, status: "failed" }
+                  : item
+              )
+          );
+          setNotice(err.message || "I could not answer that question.");
+        },
       });
     } catch (error) {
-      setMessages((current) => current.map((item) => item.clientMessageId === clientMessageId ? { ...item, status: "failed" } : item));
+      setMessages((current) =>
+        current
+          .filter((item) => item.id !== assistantPlaceholderId)
+          .map((item) =>
+            item.clientMessageId === clientMessageId
+              ? { ...item, status: "failed" }
+              : item
+          )
+      );
       setNotice(error instanceof Error ? error.message : "I could not answer that question.");
     } finally {
       setThinking(false);
@@ -539,7 +609,7 @@ export default function Home() {
                       </div>
                     )}
                     {message.mode && <span className="answer-mode">{answerModeLabel(message.mode)}</span>}
-                    {message.status === "failed" && (
+                    {message.status === "failed" && message.role === "user" && (
                       <button className="retry-message" type="button" onClick={() => void submitMessage(message.content, message.clientMessageId ?? message.id)}>
                         Couldn’t send. Retry
                       </button>
@@ -547,7 +617,7 @@ export default function Home() {
                   </div>
                 </article>
               ))}
-              {thinking && (
+              {thinking && !messages.some((m) => m.role === "assistant" && m.status === "pending" && m.content) && (
                 <article className="message assistant thinking-message">
                   <div className="avatar">P</div>
                   <div className="thinking-dots" aria-label="Searching documents"><span /><span /><span /></div>

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -12,16 +14,21 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import Settings
 from .extraction import ExtractionError, chunk_pages, count_people, extract_pages
-from .llm import LLMService, create_llm_provider, generate_with_cerebras
+from .llm import (
+    LLMService,
+    create_llm_provider,
+    generate_with_cerebras,
+    generate_with_cerebras_stream,
+)
 from .reranker import RerankerService
 from .retrieval import hybrid_retrieve, synthesize_answer
 from .store import Store
 from .vector_service import VectorService
-
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +41,7 @@ class ChatRequest(BaseModel):
     top_k: int = Field(default=4, ge=1, le=8)
     session_id: str | None = Field(default=None, min_length=8, max_length=128)
     client_message_id: str | None = Field(default=None, min_length=8, max_length=128)
+    stream: bool = False
 
 
 class CreateSessionRequest(BaseModel):
@@ -295,13 +303,14 @@ def create_app(
             raise HTTPException(status_code=404, detail="Conversation not found.")
         return Response(status_code=204)
 
-    @app.post("/api/chat")
-    async def chat(payload: ChatRequest, request: Request) -> dict:
+    @app.post("/api/chat", response_model=None)
+    async def chat(payload: ChatRequest, request: Request) -> Response | dict:
         owner_id = request_owner(request, settings)
         client_message_id = payload.client_message_id or uuid4().hex
         history: list[dict] = []
         scoped_person = payload.person
         scoped_doc_ids = payload.document_ids
+        is_streaming = payload.stream or "text/event-stream" in request.headers.get("accept", "")
 
         if payload.session_id:
             session = store.get_chat_session(owner_id, payload.session_id)
@@ -312,6 +321,34 @@ def create_app(
             )
             if persisted:
                 assistant = persisted["assistant_message"]
+                if is_streaming:
+                    async def replay_stream():
+                        meta = {
+                            "sources": assistant["sources"],
+                            "people": [],
+                            "mode": assistant["mode"],
+                            "retrieval_mode": assistant["retrieval_mode"],
+                        }
+                        yield f"event: metadata\ndata: {json.dumps(meta)}\n\n"
+                        yield f"event: token\ndata: {json.dumps({'delta': assistant['content']})}\n\n"
+                        complete_payload = {
+                            "session_id": persisted["session"]["id"],
+                            "topic": persisted["session"]["topic"],
+                            "user_message": persisted["user_message"],
+                            "assistant_message": assistant,
+                            "answer": assistant["content"],
+                        }
+                        yield f"event: complete\ndata: {json.dumps(complete_payload)}\n\n"
+
+                    return StreamingResponse(
+                        replay_stream(),
+                        media_type="text/event-stream",
+                        headers={
+                            "Cache-Control": "no-cache",
+                            "Connection": "keep-alive",
+                            "X-Accel-Buffering": "no",
+                        },
+                    )
                 return {
                     "answer": assistant["content"], "sources": assistant["sources"],
                     "mode": assistant["mode"], "retrieval_mode": assistant["retrieval_mode"],
@@ -340,6 +377,106 @@ def create_app(
             reranker=RerankerService(enabled=settings.reranker_enabled, model_name=settings.reranker_model),
             history=history,
         )
+
+        if is_streaming:
+            stream_gen = None
+            if llm_service is not None:
+                stream_gen, mode = await llm.generate_stream(
+                    question=payload.message,
+                    sources=sources,
+                    history=history,
+                )
+            elif settings.llm_provider == "cerebras":
+                if settings.cerebras_api_key:
+                    stream_gen = generate_with_cerebras_stream(
+                        api_key=settings.cerebras_api_key,
+                        base_url=settings.cerebras_base_url,
+                        model=settings.cerebras_model,
+                        question=payload.message,
+                        sources=sources,
+                        history=history,
+                    )
+                    mode = f"cerebras:{settings.cerebras_model}"
+                else:
+                    stream_gen = None
+                    mode = "local-grounded"
+            else:
+                stream_gen, mode = await llm.generate_stream(
+                    question=payload.message,
+                    sources=sources,
+                    history=history,
+                )
+
+            async def event_stream() -> AsyncIterator[str]:
+                meta = {
+                    "sources": sources,
+                    "people": identified_people,
+                    "mode": mode,
+                    "retrieval_mode": retrieval_mode,
+                }
+                yield f"event: metadata\ndata: {json.dumps(meta)}\n\n"
+
+                accumulated_tokens: list[str] = []
+                if stream_gen is not None:
+                    try:
+                        async for token in stream_gen:
+                            if token:
+                                accumulated_tokens.append(token)
+                                yield f"event: token\ndata: {json.dumps({'delta': token})}\n\n"
+                    except Exception as exc:
+                        logger.warning("Stream token error: %s", exc)
+
+                full_answer = "".join(accumulated_tokens).strip()
+                persisted_mode = mode
+                if not full_answer:
+                    persisted_mode = "local-grounded"
+                    full_answer = synthesize_answer(payload.message, identified_people, sources)
+                    for chunk in re.split(r"(\s+)", full_answer):
+                        if chunk:
+                            yield f"event: token\ndata: {json.dumps({'delta': chunk})}\n\n"
+
+                if sources and not any(f"[{source['index']}]" in full_answer for source in sources):
+                    citation_suffix = "\n\n" + " ".join(f"[{source['index']}]" for source in sources[:2])
+                    full_answer += citation_suffix
+                    yield f"event: token\ndata: {json.dumps({'delta': citation_suffix})}\n\n"
+
+                persisted = store.persist_chat_turn(
+                    owner_id,
+                    session_id=payload.session_id,
+                    client_message_id=client_message_id,
+                    content=payload.message,
+                    document_ids=payload.document_ids,
+                    person=payload.person,
+                    answer=full_answer,
+                    sources=sources,
+                    mode=persisted_mode,
+                    retrieval_mode=retrieval_mode,
+                    topic=initial_topic(payload.message),
+                )
+                if not persisted:
+                    yield f"event: error\ndata: {json.dumps({'detail': 'Conversation not found.'})}\n\n"
+                    return
+
+                assistant = persisted["assistant_message"]
+                complete_payload = {
+                    "session_id": persisted["session"]["id"],
+                    "topic": persisted["session"]["topic"],
+                    "user_message": persisted["user_message"],
+                    "assistant_message": assistant,
+                    "answer": assistant["content"],
+                }
+                yield f"event: complete\ndata: {json.dumps(complete_payload)}\n\n"
+
+            return StreamingResponse(
+                event_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         if llm_service is not None:
             generated, mode = await llm.generate(
                 question=payload.message,
@@ -347,15 +484,18 @@ def create_app(
                 history=history,
             )
         elif settings.llm_provider == "cerebras":
-            generated = await generate_with_cerebras(
-                api_key=settings.cerebras_api_key,
-                base_url=settings.cerebras_base_url,
-                model=settings.cerebras_model,
-                question=payload.message,
-                sources=sources,
-                history=history,
-            )
-            mode = f"cerebras:{settings.cerebras_model}" if generated else "local-grounded"
+            if settings.cerebras_api_key:
+                generated = await generate_with_cerebras(
+                    api_key=settings.cerebras_api_key,
+                    base_url=settings.cerebras_base_url,
+                    model=settings.cerebras_model,
+                    question=payload.message,
+                    sources=sources,
+                    history=history,
+                )
+                mode = f"cerebras:{settings.cerebras_model}" if generated else "local-grounded"
+            else:
+                generated, mode = None, "local-grounded"
         else:
             generated, mode = await llm.generate(
                 question=payload.message,

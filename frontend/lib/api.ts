@@ -124,3 +124,117 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
+
+export type ChatStreamMetadata = {
+  sources: Source[];
+  people: string[];
+  mode: string;
+  retrieval_mode: string;
+};
+
+export type ChatStreamComplete = {
+  session_id: string;
+  topic: string;
+  user_message: ChatMessage;
+  assistant_message: ChatMessage;
+  answer: string;
+};
+
+export type ChatStreamEvents = {
+  onMetadata?: (meta: ChatStreamMetadata) => void;
+  onToken?: (delta: string) => void;
+  onComplete?: (data: ChatStreamComplete) => void;
+  onError?: (error: Error) => void;
+};
+
+export async function streamChat(
+  request: ChatRequest,
+  events: ChatStreamEvents,
+  options?: { signal?: AbortSignal },
+): Promise<void> {
+  const response = await fetch("/api/chat", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "text/event-stream",
+    },
+    body: JSON.stringify({ ...request, stream: true }),
+    signal: options?.signal,
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("text/event-stream")) {
+    const data = (await response.json()) as ChatResponse;
+    events.onMetadata?.({
+      sources: data.sources,
+      people: [],
+      mode: data.mode,
+      retrieval_mode: data.retrieval_mode,
+    });
+    events.onToken?.(data.answer);
+    events.onComplete?.({
+      session_id: data.session_id,
+      topic: data.topic,
+      user_message: data.user_message,
+      assistant_message: data.assistant_message,
+      answer: data.answer,
+    });
+    return;
+  }
+
+  if (!response.body) {
+    throw new Error("No response body available for stream.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      let currentEvent = "message";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          currentEvent = "message";
+          continue;
+        }
+        if (trimmed.startsWith("event:")) {
+          currentEvent = trimmed.slice(6).trim();
+        } else if (trimmed.startsWith("data:")) {
+          const dataStr = trimmed.slice(5).trim();
+          try {
+            const parsed = JSON.parse(dataStr);
+            if (currentEvent === "metadata") {
+              events.onMetadata?.(parsed);
+            } else if (currentEvent === "token") {
+              if (typeof parsed.delta === "string") events.onToken?.(parsed.delta);
+            } else if (currentEvent === "complete") {
+              events.onComplete?.(parsed);
+            } else if (currentEvent === "error") {
+              events.onError?.(new Error(parsed.detail ?? "Streaming error"));
+            }
+          } catch {
+            if (currentEvent === "token") {
+              events.onToken?.(dataStr);
+            }
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+

@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -620,4 +621,165 @@ def test_multi_turn_chat_with_llm_receives_prior_turns(tmp_path):
         assert received_histories[1][0]["role"] == "user"
         assert received_histories[1][0]["content"] == "What does Jordan Lee own?"
         assert received_histories[1][1]["role"] == "assistant"
+
+
+def parse_sse_events(text: str) -> list[tuple[str, dict]]:
+    events = []
+    current_event = "message"
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            current_event = "message"
+            continue
+        if line.startswith("event:"):
+            current_event = line[6:].strip()
+        elif line.startswith("data:"):
+            data_str = line[5:].strip()
+            data = json.loads(data_str)
+            events.append((current_event, data))
+    return events
+
+
+def test_chat_sse_streaming_local_fallback(tmp_path):
+    client, document = client_with_sample(tmp_path)
+    try:
+        response = client.post(
+            "/api/chat",
+            json={"message": "What does Jordan Lee own?", "document_ids": [document["id"]], "stream": True},
+        )
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+
+        events = parse_sse_events(response.text)
+        event_types = [e[0] for e in events]
+        assert "metadata" in event_types
+        assert "token" in event_types
+        assert "complete" in event_types
+
+        # Verify metadata
+        meta = next(data for ev, data in events if ev == "metadata")
+        assert meta["mode"] == "local-grounded"
+        assert meta["people"] == ["Jordan Lee"]
+        assert len(meta["sources"]) >= 1
+
+        # Verify tokens
+        tokens = [data["delta"] for ev, data in events if ev == "token"]
+        full_text = "".join(tokens)
+        assert "[1]" in full_text
+
+        # Verify complete
+        complete = next(data for ev, data in events if ev == "complete")
+        assert complete["session_id"]
+        assert complete["topic"]
+        assert complete["user_message"]["role"] == "user"
+        assert complete["assistant_message"]["role"] == "assistant"
+        assert complete["answer"] == full_text
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_chat_sse_streaming_accept_header(tmp_path):
+    client, document = client_with_sample(tmp_path)
+    try:
+        response = client.post(
+            "/api/chat",
+            headers={"Accept": "text/event-stream"},
+            json={"message": "What does Jordan Lee own?", "document_ids": [document["id"]]},
+        )
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+
+        events = parse_sse_events(response.text)
+        assert any(ev == "metadata" for ev, _ in events)
+        assert any(ev == "token" for ev, _ in events)
+        assert any(ev == "complete" for ev, _ in events)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_chat_sse_streaming_custom_provider(tmp_path):
+    class MockStreamingProvider(LLMProvider):
+        @property
+        def provider_name(self) -> str:
+            return "stream-test"
+
+        @property
+        def model_name(self) -> str:
+            return "v1"
+
+        def is_configured(self) -> bool:
+            return True
+
+        async def _send_request(self, client, *, question, context, history=None):
+            return "Full mock response [1]."
+
+        async def _stream_request(self, client, *, question, context, history=None):
+            yield "Mock "
+            yield "streamed "
+            yield "tokens [1]."
+
+    custom_service = LLMService(MockStreamingProvider())
+    app = create_app(tmp_path, llm_service=custom_service)
+    with TestClient(app) as client:
+        upload = client.post(
+            "/api/documents",
+            files={"file": ("people-notes.txt", SAMPLE, "text/plain")},
+        ).json()
+
+        response = client.post(
+            "/api/chat",
+            json={"message": "What does Jordan Lee own?", "document_ids": [upload["id"]], "stream": True},
+        )
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+
+        events = parse_sse_events(response.text)
+        tokens = [data["delta"] for ev, data in events if ev == "token"]
+        assert "".join(tokens) == "Mock streamed tokens [1]."
+
+        complete = next(data for ev, data in events if ev == "complete")
+        assert complete["answer"] == "Mock streamed tokens [1]."
+        assert complete["assistant_message"]["mode"] == "stream-test:v1"
+
+
+def test_chat_sse_streaming_idempotent_replay(tmp_path):
+    client, document = client_with_sample(tmp_path)
+    try:
+        # Create session first
+        session = client.post("/api/sessions", json={"topic": "Test replay"}).json()
+        session_id = session["id"]
+
+        # Request 1
+        r1 = client.post(
+            "/api/chat",
+            json={
+                "session_id": session_id,
+                "client_message_id": "msg-replay-123456",
+                "message": "What does Jordan Lee own?",
+                "stream": True,
+            },
+        )
+        assert r1.status_code == 200
+        events1 = parse_sse_events(r1.text)
+        complete1 = next(data for ev, data in events1 if ev == "complete")
+
+        # Request 2 (Idempotent replay)
+        r2 = client.post(
+            "/api/chat",
+            json={
+                "session_id": session_id,
+                "client_message_id": "msg-replay-123456",
+                "message": "What does Jordan Lee own?",
+                "stream": True,
+            },
+        )
+        assert r2.status_code == 200
+        assert "text/event-stream" in r2.headers["content-type"]
+        events2 = parse_sse_events(r2.text)
+        complete2 = next(data for ev, data in events2 if ev == "complete")
+        assert complete2["assistant_message"]["id"] == complete1["assistant_message"]["id"]
+        assert complete2["answer"] == complete1["answer"]
+    finally:
+        client.__exit__(None, None, None)
+
 

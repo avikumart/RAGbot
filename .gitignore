@@ -13,3 +13,4 @@ personagraph-data/
 .vinext/
 playwright-report/
 test-results/
+.agents/

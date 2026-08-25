@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 import httpx
@@ -85,6 +87,26 @@ class LLMProvider(ABC):
         """Performs the provider-specific HTTP request and returns parsed text content."""
         ...
 
+    async def _stream_request(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        question: str,
+        context: str,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
+        """Streams text chunks from the provider. Default implementation falls back to _send_request."""
+        try:
+            answer = await self._send_request(
+                client, question=question, context=context, history=history
+            )
+        except TypeError:
+            answer = await self._send_request(
+                client, question=question, context=context
+            )
+        if answer:
+            yield answer
+
     async def generate_response(
         self,
         *,
@@ -138,6 +160,58 @@ class LLMProvider(ABC):
 
         return None
 
+    async def stream_response(
+        self,
+        *,
+        question: str,
+        sources: list[dict],
+        history: list[dict] | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> AsyncIterator[str]:
+        """Streams text chunks from the provider."""
+        if not self.is_configured() or not sources:
+            return
+
+        context = format_source_context(sources)
+        logger.info(
+            "Streaming completion from %s with model %s and %d source(s).",
+            self.provider_name,
+            self.model_name,
+            len(sources),
+        )
+
+        try:
+            if client is not None:
+                try:
+                    async for token in self._stream_request(
+                        client, question=question, context=context, history=history
+                    ):
+                        yield token
+                except TypeError:
+                    async for token in self._stream_request(
+                        client, question=question, context=context
+                    ):
+                        yield token
+            else:
+                async with httpx.AsyncClient(timeout=self.timeout) as owned_client:
+                    try:
+                        async for token in self._stream_request(
+                            owned_client, question=question, context=context, history=history
+                        ):
+                            yield token
+                    except TypeError:
+                        async for token in self._stream_request(
+                            owned_client, question=question, context=context
+                        ):
+                            yield token
+        except (httpx.HTTPError, TypeError, ValueError, KeyError) as exc:
+            logger.warning(
+                "%s streaming failed; falling back: %s",
+                self.provider_name.capitalize(),
+                exc,
+            )
+            return
+
 
 class CerebrasProvider(LLMProvider):
     """Cerebras Cloud LLM provider using developer-role chat completions."""
@@ -149,6 +223,19 @@ class CerebrasProvider(LLMProvider):
     def is_configured(self) -> bool:
         return bool(self.api_key and self.base_url and self.model)
 
+    def _build_messages(
+        self, question: str, context: str, history: list[dict] | None = None
+    ) -> list[dict]:
+        messages: list[dict] = [{"role": "developer", "content": SYSTEM_PROMPT}]
+        if history:
+            for turn in history:
+                role = "assistant" if turn.get("role") == "assistant" else "user"
+                messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append(
+            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"}
+        )
+        return messages
+
     async def _send_request(
         self,
         client: httpx.AsyncClient,
@@ -157,16 +244,7 @@ class CerebrasProvider(LLMProvider):
         context: str,
         history: list[dict] | None = None,
     ) -> str | None:
-        messages: list[dict] = [
-            {"role": "developer", "content": SYSTEM_PROMPT}
-        ]
-        if history:
-            for turn in history:
-                role = "assistant" if turn.get("role") == "assistant" else "user"
-                messages.append({"role": role, "content": turn.get("content", "")})
-        messages.append(
-            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"}
-        )
+        messages = self._build_messages(question, context, history)
         response = await client.post(
             f"{self.base_url}/chat/completions",
             headers={
@@ -194,6 +272,51 @@ class CerebrasProvider(LLMProvider):
             return None
         return message["content"].strip() or None
 
+    async def _stream_request(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        question: str,
+        context: str,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
+        messages = self._build_messages(question, context, history)
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "messages": messages,
+                "max_completion_tokens": 1024,
+                "reasoning_effort": "low",
+                "stream": True,
+                "temperature": 0.1,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data_str)
+                    choices = payload.get("choices", [])
+                    if choices and isinstance(choices[0], dict):
+                        delta = choices[0].get("delta", {})
+                        if isinstance(delta, dict) and "content" in delta:
+                            content = delta["content"]
+                            if content:
+                                yield content
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
+
 
 class OpenAICompatibleProvider(LLMProvider):
     """Provider for OpenAI-compatible endpoints (OpenAI, Groq, Ollama, vLLM, DeepSeek)."""
@@ -215,10 +338,22 @@ class OpenAICompatibleProvider(LLMProvider):
         return self._provider_label
 
     def is_configured(self) -> bool:
-        # Local engines like Ollama do not require an API key
         if self._provider_label in {"ollama", "vllm", "localai"}:
             return bool(self.base_url and self.model)
         return bool(self.api_key and self.base_url and self.model)
+
+    def _build_messages(
+        self, question: str, context: str, history: list[dict] | None = None
+    ) -> list[dict]:
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if history:
+            for turn in history:
+                role = "assistant" if turn.get("role") == "assistant" else "user"
+                messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append(
+            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"}
+        )
+        return messages
 
     async def _send_request(
         self,
@@ -232,17 +367,7 @@ class OpenAICompatibleProvider(LLMProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT}
-        ]
-        if history:
-            for turn in history:
-                role = "assistant" if turn.get("role") == "assistant" else "user"
-                messages.append({"role": role, "content": turn.get("content", "")})
-        messages.append(
-            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"}
-        )
-
+        messages = self._build_messages(question, context, history)
         response = await client.post(
             f"{self.base_url}/chat/completions",
             headers=headers,
@@ -266,6 +391,51 @@ class OpenAICompatibleProvider(LLMProvider):
             return None
         return message["content"].strip() or None
 
+    async def _stream_request(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        question: str,
+        context: str,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        messages = self._build_messages(question, context, history)
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            headers=headers,
+            json={
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.1,
+                "max_tokens": 1024,
+                "stream": True,
+            },
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    payload = json.loads(data_str)
+                    choices = payload.get("choices", [])
+                    if choices and isinstance(choices[0], dict):
+                        delta = choices[0].get("delta", {})
+                        if isinstance(delta, dict) and "content" in delta:
+                            content = delta["content"]
+                            if content:
+                                yield content
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
+
 
 class GeminiProvider(LLMProvider):
     """Google Gemini LLM provider using REST API generateContent."""
@@ -287,6 +457,26 @@ class GeminiProvider(LLMProvider):
     def is_configured(self) -> bool:
         return bool(self.api_key and self.base_url and self.model)
 
+    def _build_payload(
+        self, question: str, context: str, history: list[dict] | None = None
+    ) -> dict:
+        contents: list[dict] = []
+        if history:
+            for turn in history:
+                role = "model" if turn.get("role") == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": turn.get("content", "")}]})
+        contents.append(
+            {
+                "role": "user",
+                "parts": [{"text": f"Sources:\n{context}\n\nQuestion: {question}"}],
+            }
+        )
+        return {
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": contents,
+            "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024},
+        }
+
     async def _send_request(
         self,
         client: httpx.AsyncClient,
@@ -300,27 +490,7 @@ class GeminiProvider(LLMProvider):
             "Content-Type": "application/json",
             "x-goog-api-key": self.api_key,
         }
-        contents: list[dict] = []
-        if history:
-            for turn in history:
-                role = "model" if turn.get("role") == "assistant" else "user"
-                contents.append({"role": role, "parts": [{"text": turn.get("content", "")}]})
-        contents.append(
-            {
-                "role": "user",
-                "parts": [{"text": f"Sources:\n{context}\n\nQuestion: {question}"}],
-            }
-        )
-        body = {
-            "systemInstruction": {
-                "parts": [{"text": SYSTEM_PROMPT}]
-            },
-            "contents": contents,
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 1024,
-            },
-        }
+        body = self._build_payload(question, context, history)
         response = await client.post(endpoint, headers=headers, json=body)
         response.raise_for_status()
         payload = response.json()
@@ -338,6 +508,42 @@ class GeminiProvider(LLMProvider):
         text_parts = [p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p]
         answer = "".join(text_parts).strip()
         return answer or None
+
+    async def _stream_request(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        question: str,
+        context: str,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
+        endpoint = f"{self.base_url}/models/{self.model}:streamGenerateContent?alt=sse"
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+        body = self._build_payload(question, context, history)
+        async with client.stream("POST", endpoint, headers=headers, json=body) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                try:
+                    payload = json.loads(data_str)
+                    candidates = payload.get("candidates", [])
+                    if candidates and isinstance(candidates[0], dict):
+                        content = candidates[0].get("content", {})
+                        if isinstance(content, dict):
+                            parts = content.get("parts", [])
+                            for part in parts:
+                                if isinstance(part, dict) and "text" in part:
+                                    text = part["text"]
+                                    if text:
+                                        yield text
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
 
 
 class AnthropicProvider(LLMProvider):
@@ -360,6 +566,19 @@ class AnthropicProvider(LLMProvider):
     def is_configured(self) -> bool:
         return bool(self.api_key and self.base_url and self.model)
 
+    def _build_messages(
+        self, question: str, context: str, history: list[dict] | None = None
+    ) -> list[dict]:
+        messages: list[dict] = []
+        if history:
+            for turn in history:
+                role = "assistant" if turn.get("role") == "assistant" else "user"
+                messages.append({"role": role, "content": turn.get("content", "")})
+        messages.append(
+            {"role": "user", "content": f"Sources:\n{context}\n\nQuestion: {question}"}
+        )
+        return messages
+
     async def _send_request(
         self,
         client: httpx.AsyncClient,
@@ -373,17 +592,7 @@ class AnthropicProvider(LLMProvider):
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
-        messages: list[dict] = []
-        if history:
-            for turn in history:
-                role = "assistant" if turn.get("role") == "assistant" else "user"
-                messages.append({"role": role, "content": turn.get("content", "")})
-        messages.append(
-            {
-                "role": "user",
-                "content": f"Sources:\n{context}\n\nQuestion: {question}",
-            }
-        )
+        messages = self._build_messages(question, context, history)
         body = {
             "model": self.model,
             "max_tokens": 1024,
@@ -406,6 +615,46 @@ class AnthropicProvider(LLMProvider):
         ]
         answer = "".join(text_parts).strip()
         return answer or None
+
+    async def _stream_request(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        question: str,
+        context: str,
+        history: list[dict] | None = None,
+    ) -> AsyncIterator[str]:
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        messages = self._build_messages(question, context, history)
+        body = {
+            "model": self.model,
+            "max_tokens": 1024,
+            "temperature": 0.1,
+            "system": SYSTEM_PROMPT,
+            "messages": messages,
+            "stream": True,
+        }
+        async with client.stream("POST", f"{self.base_url}/messages", headers=headers, json=body) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data_str = line[5:].strip()
+                try:
+                    payload = json.loads(data_str)
+                    if isinstance(payload, dict) and payload.get("type") == "content_block_delta":
+                        delta = payload.get("delta", {})
+                        if isinstance(delta, dict) and delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            if text:
+                                yield text
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
 
 
 def create_llm_provider(settings: Settings) -> LLMProvider | None:
@@ -473,6 +722,12 @@ class LLMService:
     def is_configured(self) -> bool:
         return self._provider is not None and self._provider.is_configured()
 
+    @property
+    def mode_label(self) -> str:
+        if self._provider and self._provider.is_configured():
+            return self._provider.mode_label
+        return "local-grounded"
+
     async def generate(
         self,
         *,
@@ -496,6 +751,28 @@ class LLMService:
             return answer, self._provider.mode_label
         return None, "local-grounded"
 
+    async def generate_stream(
+        self,
+        *,
+        question: str,
+        sources: list[dict],
+        history: list[dict] | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> tuple[AsyncIterator[str] | None, str]:
+        """Generates streaming tokens using the configured provider.
+
+        Returns (stream_generator, mode_label). If no provider is configured, returns (None, 'local-grounded').
+        """
+        if not self._provider or not self._provider.is_configured() or not sources:
+            return None, "local-grounded"
+
+        return (
+            self._provider.stream_response(
+                question=question, sources=sources, history=history, client=client
+            ),
+            self._provider.mode_label,
+        )
+
 
 async def generate_with_cerebras(
     *,
@@ -512,4 +789,22 @@ async def generate_with_cerebras(
     return await provider.generate_response(
         question=question, sources=sources, history=history, client=client
     )
+
+
+async def generate_with_cerebras_stream(
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    question: str,
+    sources: list[dict],
+    history: list[dict] | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> AsyncIterator[str]:
+    """Backward-compatible helper function for streaming Cerebras generation."""
+    provider = CerebrasProvider(api_key=api_key, base_url=base_url, model=model)
+    async for token in provider.stream_response(
+        question=question, sources=sources, history=history, client=client
+    ):
+        yield token
 
