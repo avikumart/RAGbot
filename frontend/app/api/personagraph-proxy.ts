@@ -39,6 +39,8 @@ export async function proxyPersonagraph(request: Request, path: string) {
   const forwardedHeaders = new Headers();
   const contentType = request.headers.get("content-type");
   if (contentType) forwardedHeaders.set("content-type", contentType);
+  const accept = request.headers.get("accept");
+  if (accept) forwardedHeaders.set("accept", accept);
   if (secret) {
     forwardedHeaders.set("x-personagraph-owner", owner);
     forwardedHeaders.set("x-personagraph-owner-timestamp", timestamp);
@@ -59,5 +61,7 @@ export async function proxyPersonagraph(request: Request, path: string) {
   const responseHeaders = new Headers();
   const upstreamContentType = upstream.headers.get("content-type");
   if (upstreamContentType) responseHeaders.set("content-type", upstreamContentType);
+  const cacheControl = upstream.headers.get("cache-control");
+  if (cacheControl) responseHeaders.set("cache-control", cacheControl);
   return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
 }

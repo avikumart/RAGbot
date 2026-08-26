@@ -14,6 +14,7 @@ from app.llm import (
     ensure_bracketed_citations,
     format_source_context,
     generate_with_cerebras,
+    generate_with_cerebras_stream,
 )
 
 SOURCES = [
@@ -481,5 +482,182 @@ def test_cerebras_backward_compatible_helper():
             )
 
     assert asyncio.run(run_test()) == "Jordan owns the rollout plan.\n\n[1]"
+
+
+def test_cerebras_stream_response():
+    async def run_test() -> list[str]:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            assert payload["stream"] is True
+            sse_content = (
+                "data: " + json.dumps({"choices": [{"delta": {"content": "Jordan "}}]}) + "\n\n"
+                "data: " + json.dumps({"choices": [{"delta": {"content": "owns "}}]}) + "\n\n"
+                "data: " + json.dumps({"choices": [{"delta": {"content": "the rollout."}}]}) + "\n\n"
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=sse_content)
+
+        tokens = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = CerebrasProvider(
+                api_key="test-api-key",
+                base_url="https://api.cerebras.ai/v1",
+                model="gpt-oss-120b",
+            )
+            async for token in provider.stream_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            ):
+                tokens.append(token)
+        return tokens
+
+    assert asyncio.run(run_test()) == ["Jordan ", "owns ", "the rollout."]
+
+
+def test_openai_stream_response():
+    async def run_test() -> list[str]:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            assert payload["stream"] is True
+            sse_content = (
+                "data: " + json.dumps({"choices": [{"delta": {"content": "Streaming "}}]}) + "\n\n"
+                "data: " + json.dumps({"choices": [{"delta": {"content": "OpenAI "}}]}) + "\n\n"
+                "data: " + json.dumps({"choices": [{"delta": {"content": "response."}}]}) + "\n\n"
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=sse_content)
+
+        tokens = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICompatibleProvider(
+                api_key="openai-key",
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+            )
+            async for token in provider.stream_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            ):
+                tokens.append(token)
+        return tokens
+
+    assert asyncio.run(run_test()) == ["Streaming ", "OpenAI ", "response."]
+
+
+def test_gemini_stream_response():
+    async def run_test() -> list[str]:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert "streamGenerateContent?alt=sse" in str(request.url)
+            sse_content = (
+                "data: " + json.dumps({"candidates": [{"content": {"parts": [{"text": "Gemini "}]}}]}) + "\n\n"
+                "data: " + json.dumps({"candidates": [{"content": {"parts": [{"text": "token "}]}}]}) + "\n\n"
+                "data: " + json.dumps({"candidates": [{"content": {"parts": [{"text": "stream."}]}}]}) + "\n\n"
+            )
+            return httpx.Response(200, text=sse_content)
+
+        tokens = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = GeminiProvider(
+                api_key="gemini-key",
+                base_url="https://generativelanguage.googleapis.com/v1beta",
+                model="gemini-1.5-flash",
+            )
+            async for token in provider.stream_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            ):
+                tokens.append(token)
+        return tokens
+
+    assert asyncio.run(run_test()) == ["Gemini ", "token ", "stream."]
+
+
+def test_anthropic_stream_response():
+    async def run_test() -> list[str]:
+        async def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            assert payload["stream"] is True
+            sse_content = (
+                "event: content_block_delta\n"
+                "data: " + json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Claude "}}) + "\n\n"
+                "event: content_block_delta\n"
+                "data: " + json.dumps({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "stream."}}) + "\n\n"
+            )
+            return httpx.Response(200, text=sse_content)
+
+        tokens = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = AnthropicProvider(
+                api_key="anthropic-key",
+                base_url="https://api.anthropic.com/v1",
+                model="claude-3-5-haiku-latest",
+            )
+            async for token in provider.stream_response(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            ):
+                tokens.append(token)
+        return tokens
+
+    assert asyncio.run(run_test()) == ["Claude ", "stream."]
+
+
+def test_llm_service_generate_stream():
+    async def run_test():
+        async def handler(_: httpx.Request) -> httpx.Response:
+            sse_content = (
+                "data: " + json.dumps({"choices": [{"delta": {"content": "Service stream [1]. "}}]}) + "\n\n"
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=sse_content)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = CerebrasProvider(
+                api_key="key",
+                base_url="https://api.cerebras.ai/v1",
+                model="model",
+            )
+            service = LLMService(provider)
+            stream_gen, mode = await service.generate_stream(
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            )
+            assert mode == "cerebras:model"
+            assert stream_gen is not None
+            tokens = [t async for t in stream_gen]
+            return tokens
+
+    assert asyncio.run(run_test()) == ["Service stream [1]. "]
+
+
+def test_cerebras_backward_compatible_stream_helper():
+    async def run_test():
+        async def handler(_: httpx.Request) -> httpx.Response:
+            sse_content = (
+                "data: " + json.dumps({"choices": [{"delta": {"content": "Streamed helper"}}]}) + "\n\n"
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=sse_content)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            tokens = []
+            async for token in generate_with_cerebras_stream(
+                api_key="key",
+                base_url="https://api.cerebras.ai/v1",
+                model="model",
+                question="What does Jordan own?",
+                sources=SOURCES,
+                client=client,
+            ):
+                tokens.append(token)
+            return tokens
+
+    assert asyncio.run(run_test()) == ["Streamed helper"]
+
 
 
