@@ -73,7 +73,7 @@ def test_alembic_baseline_and_store_round_trip(tmp_path):
         assert set(TABLE_COLUMNS) | {"alembic_version"} <= tables
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone()["version_num"] == "002_multi_tenant_isolation"
+        ).fetchone()["version_num"] == "003_entity_aliases"
 
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         with store.connect() as connection:

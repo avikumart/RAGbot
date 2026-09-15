@@ -139,7 +139,10 @@ export default function Home() {
     && documents.every((document) => document.index_status === "ready");
   const visiblePeople = selectedDocument === "all"
     ? people
-    : people.filter((person) => scopedDocument?.people.includes(person.name));
+    : people.filter((person) =>
+        scopedDocument?.people.includes(person.name) ||
+        (person.aliases && person.aliases.some((alias) => scopedDocument?.people.includes(alias)))
+      );
 
   async function refreshLibrary() {
     const [nextDocuments, nextPeople] = await Promise.all([
@@ -623,7 +626,12 @@ export default function Home() {
     }
 
     setSelectedDocument(document.id);
-    if (selectedPerson && !document.people.includes(selectedPerson)) setSelectedPerson(null);
+    if (selectedPerson) {
+      const p = people.find((item) => item.name === selectedPerson);
+      const isPresent = document.people.includes(selectedPerson)
+        || Boolean(p?.aliases && p.aliases.some((a) => document.people.includes(a)));
+      if (!isPresent) setSelectedPerson(null);
+    }
   }
 
   function choosePerson(name: string) {
@@ -841,21 +849,38 @@ export default function Home() {
             <div className="people-empty people-loading" role="status"><span className="state-spinner" aria-hidden="true" /><p>Loading subjects…</p></div>
           ) : visiblePeople.length ? (
             <div className="people-list">
-              {visiblePeople.map((person, index) => (
-                <button
-                  type="button"
-                  className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
-                  key={person.normalized}
-                  onClick={() => choosePerson(person.name)}
-                >
-                  <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
-                  <span>
-                    <strong>{person.name}</strong>
-                    <small>{subjectDescription(person)}</small>
-                  </span>
-                  <b aria-hidden="true">›</b>
-                </button>
-              ))}
+              {visiblePeople.map((person, index) => {
+                const rawAliases = person.aliases || [];
+                const distinctAliases = rawAliases.filter((a) => a.toLowerCase() !== person.name.toLowerCase());
+                return (
+                  <div className="person-entry" key={person.canonical_id || person.normalized}>
+                    <button
+                      type="button"
+                      className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
+                      onClick={() => choosePerson(person.name)}
+                    >
+                      <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
+                      <span>
+                        <strong>{person.name}</strong>
+                        <small>{subjectDescription(person)}</small>
+                      </span>
+                      <b aria-hidden="true">›</b>
+                    </button>
+                    {distinctAliases.length > 0 && (
+                      <details className="person-aliases-details">
+                        <summary className="person-aliases-summary">
+                          {distinctAliases.length} {distinctAliases.length === 1 ? "alias" : "aliases"}
+                        </summary>
+                        <div className="person-aliases-list">
+                          {distinctAliases.map((alias) => (
+                            <span key={alias} className="alias-chip">{alias}</span>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div className="people-empty">

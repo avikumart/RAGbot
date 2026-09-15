@@ -6,6 +6,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 
+from .entity_resolution import get_person_aliases
 from .reranker import RerankerService
 from .store import Store
 from .vector_service import VectorService
@@ -51,47 +52,59 @@ def identify_people(
 ) -> list[str]:
     """Identifies person names mentioned in the question or prior conversational context."""
     if explicit:
-        return [explicit]
+        aliases = get_person_aliases(explicit, known_people)
+        return list(dict.fromkeys([explicit, *aliases]))
+
     folded_question = question.casefold()
-    exact = [person["name"] for person in known_people if person["normalized"] in folded_question]
-    if exact:
-        return exact
+    matched_people: list[str] = []
+    for person in known_people:
+        p_name = person["name"].casefold()
+        p_norm = person.get("normalized", "").casefold()
+        aliases = [a.casefold() for a in person.get("aliases", [])]
+        if p_norm in folded_question or p_name in folded_question or any(a in folded_question for a in aliases):
+            matched_people.extend([person["name"], *person.get("aliases", [])])
+
+    if matched_people:
+        return list(dict.fromkeys(matched_people))
 
     question_tokens = set(tokenize(question))
-    first_name_matches = [
-        person["name"] for person in known_people
-        if person["name"].split()[0].casefold() in question_tokens
-    ]
-    first_names = Counter(name.split()[0].casefold() for name in first_name_matches)
-    matches = [
-        name for name in first_name_matches
-        if first_names[name.split()[0].casefold()] == 1
-    ]
-    if matches:
-        return matches
+    first_name_matches = []
+    for person in known_people:
+        firsts = {person["name"].split()[0].casefold()}
+        for a in person.get("aliases", []):
+            firsts.add(a.split()[0].casefold())
+        if firsts & question_tokens:
+            first_name_matches.append(person)
+
+    if len(first_name_matches) == 1:
+        p = first_name_matches[0]
+        return list(dict.fromkeys([p["name"], *p.get("aliases", [])]))
 
     # Resolve from recent conversational history (most recent first)
     if history:
         for turn in reversed(history):
             content = turn.get("content", "").casefold()
-            hist_exact = [
-                person["name"] for person in known_people
-                if person["normalized"] in content
-            ]
-            if hist_exact:
-                return hist_exact
+            hist_matches: list[str] = []
+            for person in known_people:
+                p_name = person["name"].casefold()
+                p_norm = person.get("normalized", "").casefold()
+                aliases = [a.casefold() for a in person.get("aliases", [])]
+                if p_norm in content or p_name in content or any(a in content for a in aliases):
+                    hist_matches.extend([person["name"], *person.get("aliases", [])])
+            if hist_matches:
+                return list(dict.fromkeys(hist_matches))
+
             hist_tokens = set(tokenize(content))
-            hist_fn_matches = [
-                person["name"] for person in known_people
-                if person["name"].split()[0].casefold() in hist_tokens
-            ]
-            hist_fn = Counter(name.split()[0].casefold() for name in hist_fn_matches)
-            hist_found = [
-                name for name in hist_fn_matches
-                if hist_fn[name.split()[0].casefold()] == 1
-            ]
-            if hist_found:
-                return hist_found
+            hist_fn_matches = []
+            for person in known_people:
+                firsts = {person["name"].split()[0].casefold()}
+                for a in person.get("aliases", []):
+                    firsts.add(a.split()[0].casefold())
+                if firsts & hist_tokens:
+                    hist_fn_matches.append(person)
+            if len(hist_fn_matches) == 1:
+                p = hist_fn_matches[0]
+                return list(dict.fromkeys([p["name"], *p.get("aliases", [])]))
 
     return []
 
@@ -122,7 +135,7 @@ def reformulate_query(
     if not needs_reformulation:
         return question, people
 
-    subject_prefix = " ".join(people) if people else ""
+    subject_prefix = people[0] if people else ""
     context_keywords: list[str] = []
     if len(tokens) <= 3:
         for turn in reversed(history):

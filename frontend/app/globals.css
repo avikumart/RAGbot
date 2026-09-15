@@ -368,6 +368,12 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .person-card { display: grid; grid-template-columns: 36px minmax(0,1fr) 10px; align-items: center; gap: 10px; width: 100%; padding: 9px; border: 1px solid transparent; border-radius: 12px; background: transparent; cursor: pointer; text-align: left; }
 .person-card:hover { background: rgba(255,255,255,.55); }
 .person-card.is-selected { border-color: #c8d7cf; background: #fffefb; box-shadow: 0 5px 15px rgba(44,43,37,.05); }
+.person-entry { display: flex; flex-direction: column; width: 100%; }
+.person-aliases-details { margin: 2px 0 4px 46px; font-size: 8px; color: var(--muted); }
+.person-aliases-summary { cursor: pointer; user-select: none; font-weight: 700; color: #767972; padding: 2px 4px; border-radius: 4px; display: inline-block; }
+.person-aliases-summary:hover { color: var(--forest); background: rgba(0,0,0,0.03); }
+.person-aliases-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.alias-chip { display: inline-block; padding: 2px 6px; border-radius: 6px; background: #eef1ed; color: #435c4b; font-size: 8px; font-weight: 600; }
 .person-avatar { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 50%; background: #d9e3dc; color: #325948; font-family: Georgia, serif; font-size: 10px; font-weight: 700; }
 .person-avatar.tone-1 { background: #eadbd3; color: #8d5139; }
 .person-avatar.tone-2 { background: #dadde9; color: #4f587e; }

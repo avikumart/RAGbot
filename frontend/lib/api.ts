@@ -34,6 +34,8 @@ export type PersonRecord = {
   name: string;
   mentions: number;
   document_count: number;
+  aliases?: string[];
+  canonical_id?: string;
 };
 
 export type Source = {
