@@ -25,6 +25,16 @@ TABLE_COLUMNS = {
     ),
     "chunks": ("id", "document_id", "ordinal", "page", "content", "people_json"),
     "people": ("document_id", "name", "normalized", "mentions", "canonical_id"),
+    "entity_relationships": (
+        "id",
+        "document_id",
+        "chunk_id",
+        "source_entity",
+        "target_entity",
+        "relation",
+        "source_type",
+        "target_type",
+    ),
     "vector_index_state": (
         "document_id",
         "status",

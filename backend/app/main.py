@@ -195,6 +195,16 @@ def create_app(
         owner_id = request_owner(request, settings)
         return store.list_people(document_id, owner_id=owner_id)
 
+    @app.get("/api/graph")
+    def graph(
+        request: Request,
+        document_id: str | None = None,
+        person: str | None = None,
+    ) -> dict:
+        owner_id = request_owner(request, settings)
+        doc_ids = [document_id] if document_id and document_id != "all" else None
+        return store.get_graph(document_ids=doc_ids, owner_id=owner_id, person=person)
+
     @app.post("/api/documents", status_code=201)
     async def upload_document(request: Request, file: UploadFile = File(...)) -> dict:
         owner_id = request_owner(request, settings)
