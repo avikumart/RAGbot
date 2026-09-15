@@ -25,6 +25,7 @@ type DocumentLibraryProps = {
   uploadQueue?: QueueItem[];
   onRetryQueueItem?: (item: QueueItem) => void;
   onClearQueue?: () => void;
+  onImportUrl?: (url: string) => void;
 };
 
 function humanSize(bytes: number) {
@@ -34,7 +35,15 @@ function humanSize(bytes: number) {
 }
 
 function documentKind(filename: string) {
-  return filename.split(".").pop()?.toUpperCase() || "DOC";
+  const ext = filename.split(".").pop()?.toLowerCase() || "";
+  if (ext === "csv") return "CSV";
+  if (ext === "xlsx" || ext === "xls") return "XLSX";
+  if (ext === "html" || ext === "htm") return "WEB";
+  if (ext === "pdf") return "PDF";
+  if (ext === "docx" || ext === "doc") return "DOC";
+  if (ext === "md") return "MD";
+  if (ext === "txt") return "TXT";
+  return ext.toUpperCase() || "DOC";
 }
 
 async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
@@ -109,8 +118,10 @@ export function DocumentLibrary({
   uploadQueue = [],
   onRetryQueueItem,
   onClearQueue,
+  onImportUrl,
 }: DocumentLibraryProps) {
   const [dragging, setDragging] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
 
   async function onDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -139,7 +150,7 @@ export function DocumentLibrary({
         <span className="upload-symbol" aria-hidden="true">↑</span>
         <div>
           <p>{uploading ? "Indexing your documents…" : "Add a document"}</p>
-          <span>PDF, DOCX, TXT or MD · Up to 50 files · 10 MB max</span>
+          <span>PDF, DOCX, TXT, MD, CSV, XLSX · Up to 50 files</span>
         </div>
         <button
           className="upload-button"
@@ -154,13 +165,43 @@ export function DocumentLibrary({
           className="visually-hidden"
           type="file"
           multiple
-          accept=".pdf,.docx,.txt,.md"
+          accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.xls,.html,.htm"
           onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
             if (files.length) onUpload(files);
           }}
         />
       </div>
+
+      {onImportUrl && (
+        <form
+          className="url-import-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (urlInput.trim()) {
+              onImportUrl(urlInput.trim());
+              setUrlInput("");
+            }
+          }}
+        >
+          <input
+            type="url"
+            className="url-import-input"
+            placeholder="Import URL (e.g. https://...)"
+            value={urlInput}
+            onChange={(e) => setUrlInput(e.target.value)}
+            disabled={uploading}
+            aria-label="Web URL to import"
+          />
+          <button
+            className="url-import-button"
+            type="submit"
+            disabled={uploading || !urlInput.trim()}
+          >
+            Import
+          </button>
+        </form>
+      )}
 
       {uploadQueue.length > 0 && (
         <UploadQueue
@@ -222,7 +263,7 @@ export function DocumentLibrary({
               aria-current={selectedDocument === document.id ? "true" : undefined}
               title={document.filename}
             >
-              <span className="file-badge">{documentKind(document.filename)}</span>
+              <span className={`file-badge is-${documentKind(document.filename).toLowerCase()}`}>{documentKind(document.filename)}</span>
               <span className="document-copy">
                 <strong title={document.filename}>{document.filename}</strong>
                 <small className="document-meta">

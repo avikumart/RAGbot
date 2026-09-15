@@ -284,7 +284,7 @@ def test_empty_library_and_unsupported_file_are_clear(tmp_path):
 
         upload = client.post(
             "/api/documents",
-            files={"file": ("people.csv", b"name,role", "text/csv")},
+            files={"file": ("people.zip", b"fake-zip-binary-data", "application/zip")},
         )
         assert upload.status_code == 422
         assert "Supported formats" in upload.json()["detail"]

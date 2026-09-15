@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -18,7 +19,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import Settings
-from .extraction import ExtractionError, chunk_pages, count_people, extract_pages
+from .extraction import (
+    ExtractedPage,
+    ExtractionError,
+    SUPPORTED_EXTENSIONS,
+    chunk_pages,
+    count_people,
+    extract_pages,
+)
+from .html_scraper import fetch_and_clean_url
 from .llm import (
     LLMService,
     create_llm_provider,
@@ -54,6 +63,10 @@ class UpdateSessionRequest(BaseModel):
     topic: str | None = Field(default=None, max_length=120)
     document_ids: list[str] | None = None
     person: str | None = Field(default=None, max_length=160)
+
+
+class IngestUrlRequest(BaseModel):
+    url: str = Field(min_length=3, max_length=2048)
 
 
 def initial_topic(message: str) -> str:
@@ -336,6 +349,85 @@ def create_app(
             "documents": documents,
             "errors": errors,
         }
+
+    @app.post("/api/documents/url", status_code=201)
+    async def ingest_document_url(request: Request, body: IngestUrlRequest) -> dict:
+        owner_id = request_owner(request, settings)
+        url = body.url.strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="URL cannot be empty.")
+
+        try:
+            title, cleaned_text, raw_bytes = await fetch_and_clean_url(
+                url,
+                max_bytes=settings.max_upload_bytes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.warning("Failed to fetch URL %s: %s", url, exc)
+            raise HTTPException(status_code=400, detail=f"Failed to fetch content from URL: {exc}") from exc
+
+        parsed = urlparse(url)
+        path_suffix = Path(parsed.path).suffix.lower()
+        if path_suffix in SUPPORTED_EXTENSIONS and path_suffix not in {".html", ".htm"}:
+            suffix = path_suffix
+            safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", Path(parsed.path).stem).strip("-")[:48] or "document"
+            filename = f"{safe_stem}{suffix}"
+            try:
+                pages = extract_pages(filename, raw_bytes)
+            except ExtractionError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        else:
+            suffix = ".html"
+            safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", title).strip("-")[:48] or "web-document"
+            filename = f"{safe_stem}.html"
+            pages = [ExtractedPage(page=None, text=cleaned_text)]
+
+        chunks = chunk_pages(pages, limit=settings.chunk_size, overlap=settings.chunk_overlap)
+        if not chunks:
+            raise HTTPException(status_code=400, detail="No readable content could be extracted from the URL.")
+
+        document_id = uuid4().hex
+        stored_path = store.upload_dir / f"{document_id}-{safe_stem}{suffix}"
+        stored_path.parent.mkdir(parents=True, exist_ok=True)
+        stored_path.write_bytes(raw_bytes)
+        try:
+            result = store.add_document(
+                document_id=document_id,
+                filename=filename,
+                content_type="text/html; charset=utf-8" if suffix == ".html" else "application/octet-stream",
+                stored_path=stored_path,
+                digest=hashlib.sha256(raw_bytes).hexdigest(),
+                size_bytes=len(raw_bytes),
+                chunks=chunks,
+                people=dict(count_people(chunks)),
+                owner_id=owner_id,
+            )
+            try:
+                processed, skipped = vectors.index_document(document_id)
+                logger.info(
+                    "Vector indexing completed document_id=%s processed=%d skipped=%d",
+                    document_id,
+                    processed,
+                    skipped,
+                )
+            except Exception as exc:
+                store.set_vector_status(
+                    document_id,
+                    "needs_reindex",
+                    settings.embedding_model,
+                    str(exc)[:500],
+                )
+                logger.warning(
+                    "Document retained but requires vector reindex document_id=%s reason=%s",
+                    document_id,
+                    exc,
+                )
+            return store.get_document(document_id, owner_id=owner_id) or result
+        except Exception:
+            stored_path.unlink(missing_ok=True)
+            raise
 
     @app.delete("/api/documents/{document_id}")
     def delete_document(document_id: str, request: Request) -> dict:

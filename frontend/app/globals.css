@@ -233,6 +233,18 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .document-item:hover { background: rgba(255,255,255,.54); }
 .document-icon { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border-radius: 10px; background: #dfe8e2; color: var(--forest); font-size: 16px; }
 .file-badge { display: grid; width: 32px; height: 34px; flex: 0 0 auto; place-items: center; border-radius: 5px 9px 9px 9px; background: #ead8cf; color: #8c4e36; font-size: 7px; font-weight: 800; letter-spacing: 0.04em; }
+.file-badge.is-csv { background: #dbeef2; color: #1e6470; }
+.file-badge.is-xlsx { background: #e0eedf; color: #2d6b38; }
+.file-badge.is-web { background: #e1ebf9; color: #28559a; }
+.file-badge.is-pdf { background: #ead8cf; color: #8c4e36; }
+.file-badge.is-doc, .file-badge.is-docx { background: #e3e8f7; color: #355299; }
+.file-badge.is-txt, .file-badge.is-md { background: #e9e7e1; color: #5f5d56; }
+.url-import-form { display: flex; gap: 6px; margin: 8px 0 4px; }
+.url-import-input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid #d5cfc4; border-radius: 9px; background: rgba(255,255,255,.8); font-size: 11px; font-family: inherit; color: var(--foreground); }
+.url-import-input:focus { outline: none; border-color: var(--forest); background: #fff; }
+.url-import-button { padding: 7px 12px; border: 1px solid #c4d4ca; border-radius: 9px; background: #eaf1ed; color: var(--forest); font-size: 11px; font-weight: 700; cursor: pointer; white-space: nowrap; transition: background .15s; }
+.url-import-button:hover:not(:disabled) { background: #d7e6dc; }
+.url-import-button:disabled { opacity: 0.5; cursor: not-allowed; }
 .document-copy { display: block; min-width: 0; flex: 1; }
 .document-copy strong, .document-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .document-copy strong { font-size: 11px; font-weight: 700; }
