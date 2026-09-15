@@ -105,6 +105,23 @@ MIGRATION_006_ENTITY_ALIASES = (
 )
 
 
+MIGRATION_007_ENTITY_RELATIONSHIPS = (
+    """CREATE TABLE IF NOT EXISTS entity_relationships (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL,
+        source_entity TEXT NOT NULL,
+        target_entity TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        source_type TEXT NOT NULL DEFAULT 'person',
+        target_type TEXT NOT NULL DEFAULT 'entity'
+    )""",
+    "CREATE INDEX IF NOT EXISTS entity_relationships_document_id_idx ON entity_relationships(document_id)",
+    "CREATE INDEX IF NOT EXISTS entity_relationships_source_idx ON entity_relationships(source_entity)",
+    "CREATE INDEX IF NOT EXISTS entity_relationships_target_idx ON entity_relationships(target_entity)",
+)
+
+
 MIGRATIONS = (
     (1, MIGRATION_001_INITIAL_SCHEMA),
     (2, MIGRATION_002_PENDING_FILE_CLEANUP),
@@ -112,6 +129,7 @@ MIGRATIONS = (
     (4, MIGRATION_004_CHUNKS_FTS),
     (5, MIGRATION_005_MULTI_TENANT_ISOLATION),
     (6, MIGRATION_006_ENTITY_ALIASES),
+    (7, MIGRATION_007_ENTITY_RELATIONSHIPS),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

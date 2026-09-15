@@ -2,14 +2,16 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { DocumentLibrary } from "@/components/document-library";
+import { PersonaGraph } from "@/components/persona-graph";
 import type { QueueItem } from "@/components/upload-queue";
-import { api, streamChat } from "@/lib/api";
+import { api, fetchGraph, streamChat } from "@/lib/api";
 import type {
   BatchUploadResponse,
   ChatMessage,
   ChatRequest,
   ChatSession,
   DocumentRecord,
+  GraphData,
   PersonRecord,
   Source,
 } from "@/lib/api";
@@ -129,6 +131,28 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [cacheHydrated, setCacheHydrated] = useState(false);
+  const [activeSideTab, setActiveSideTab] = useState<"people" | "graph">("people");
+  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadGraph() {
+      setGraphLoading(true);
+      try {
+        const data = await fetchGraph(selectedDocument === "all" ? undefined : selectedDocument);
+        if (!cancelled) setGraphData(data);
+      } catch {
+        if (!cancelled) setGraphData({ nodes: [], edges: [] });
+      } finally {
+        if (!cancelled) setGraphLoading(false);
+      }
+    }
+    loadGraph();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedDocument, documents]);
 
   const scopedDocument = documents.find((document) => document.id === selectedDocument);
   const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
@@ -841,52 +865,92 @@ export default function Home() {
             <div><strong>{people.length}</strong><span>subjects found</span></div>
           </div>
           {uploading && <p className="indexing-status" role="status"><span className="state-spinner" aria-hidden="true" /> Indexing your upload</p>}
-          <div className="people-heading">
-            <span className="eyebrow">Subjects in scope</span>
-            <span className="people-count">{visiblePeople.length}</span>
+          <div className="people-tabs" role="tablist" aria-label="Library view switcher">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeSideTab === "people"}
+              className={`people-tab-btn ${activeSideTab === "people" ? "is-active" : ""}`}
+              onClick={() => setActiveSideTab("people")}
+            >
+              Subjects ({visiblePeople.length})
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeSideTab === "graph"}
+              className={`people-tab-btn ${activeSideTab === "graph" ? "is-active" : ""}`}
+              onClick={() => setActiveSideTab("graph")}
+            >
+              Persona Graph {graphData?.nodes?.length ? `(${graphData.nodes.length})` : ""}
+            </button>
           </div>
-          {loading ? (
-            <div className="people-empty people-loading" role="status"><span className="state-spinner" aria-hidden="true" /><p>Loading subjects…</p></div>
-          ) : visiblePeople.length ? (
-            <div className="people-list">
-              {visiblePeople.map((person, index) => {
-                const rawAliases = person.aliases || [];
-                const distinctAliases = rawAliases.filter((a) => a.toLowerCase() !== person.name.toLowerCase());
-                return (
-                  <div className="person-entry" key={person.canonical_id || person.normalized}>
-                    <button
-                      type="button"
-                      className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
-                      onClick={() => choosePerson(person.name)}
-                    >
-                      <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
-                      <span>
-                        <strong>{person.name}</strong>
-                        <small>{subjectDescription(person)}</small>
-                      </span>
-                      <b aria-hidden="true">›</b>
-                    </button>
-                    {distinctAliases.length > 0 && (
-                      <details className="person-aliases-details">
-                        <summary className="person-aliases-summary">
-                          {distinctAliases.length} {distinctAliases.length === 1 ? "alias" : "aliases"}
-                        </summary>
-                        <div className="person-aliases-list">
-                          {distinctAliases.map((alias) => (
-                            <span key={alias} className="alias-chip">{alias}</span>
-                          ))}
-                        </div>
-                      </details>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+          {activeSideTab === "graph" ? (
+            <PersonaGraph
+              data={graphData}
+              selectedEntity={selectedPerson}
+              onSelectEntity={(entityName, entityType) => {
+                if (entityType === "person") {
+                  choosePerson(entityName);
+                } else {
+                  setQuestion(`What information is available about ${entityName}?`);
+                }
+              }}
+              onSelectRelationship={(source, relation, target) => {
+                setQuestion(`What is the relationship between ${source} and ${target}?`);
+              }}
+              loading={graphLoading}
+            />
           ) : (
-            <div className="people-empty">
-              <span>◇</span>
-              <p>{documents.length ? "No subjects were found in this document." : "Subjects will appear here after your first document is indexed."}</p>
-            </div>
+            <>
+              <div className="people-heading">
+                <span className="eyebrow">Subjects in scope</span>
+                <span className="people-count">{visiblePeople.length}</span>
+              </div>
+              {loading ? (
+                <div className="people-empty people-loading" role="status"><span className="state-spinner" aria-hidden="true" /><p>Loading subjects…</p></div>
+              ) : visiblePeople.length ? (
+                <div className="people-list">
+                  {visiblePeople.map((person, index) => {
+                    const rawAliases = person.aliases || [];
+                    const distinctAliases = rawAliases.filter((a) => a.toLowerCase() !== person.name.toLowerCase());
+                    return (
+                      <div className="person-entry" key={person.canonical_id || person.normalized}>
+                        <button
+                          type="button"
+                          className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
+                          onClick={() => choosePerson(person.name)}
+                        >
+                          <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
+                          <span>
+                            <strong>{person.name}</strong>
+                            <small>{subjectDescription(person)}</small>
+                          </span>
+                          <b aria-hidden="true">›</b>
+                        </button>
+                        {distinctAliases.length > 0 && (
+                          <details className="person-aliases-details">
+                            <summary className="person-aliases-summary">
+                              {distinctAliases.length} {distinctAliases.length === 1 ? "alias" : "aliases"}
+                            </summary>
+                            <div className="person-aliases-list">
+                              {distinctAliases.map((alias) => (
+                                <span key={alias} className="alias-chip">{alias}</span>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="people-empty">
+                  <span>◇</span>
+                  <p>{documents.length ? "No subjects were found in this document." : "Subjects will appear here after your first document is indexed."}</p>
+                </div>
+              )}
+            </>
           )}
           <div className="scope-card">
             <span>Retrieval scope</span>

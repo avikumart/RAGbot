@@ -392,6 +392,34 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .scope-card strong { display: block; margin-top: 6px; font-family: Georgia, serif; font-size: 12px; }
 .scope-card p { margin: 4px 0 0; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Tabs for switching between Subjects list and Persona Graph */
+.people-tabs { display: flex; gap: 4px; margin-top: 10px; margin-bottom: 8px; padding: 3px; background: rgba(0,0,0,0.04); border-radius: 8px; }
+.people-tab-btn { flex: 1; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; font-size: 8.5px; font-weight: 700; color: var(--muted); cursor: pointer; text-align: center; transition: background 0.15s, color 0.15s; }
+.people-tab-btn.is-active { background: #fff; color: var(--forest); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.people-tab-btn:hover:not(.is-active) { color: #1e293b; }
+
+/* Persona Graph */
+.persona-graph-container { display: flex; flex-direction: column; height: 380px; min-height: 280px; border: 1px solid #ddd8cd; border-radius: 12px; background: #fafaf7; overflow: hidden; position: relative; }
+.persona-graph-container.is-loading, .persona-graph-container.is-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; text-align: center; color: var(--muted); }
+.graph-empty-title { font-family: Georgia, serif; font-size: 13px; font-weight: 700; color: #374151; margin-bottom: 6px; }
+.graph-empty-sub { font-size: 9px; line-height: 1.5; max-width: 240px; }
+.graph-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: rgba(255,255,255,0.85); border-bottom: 1px solid #eae6de; z-index: 2; }
+.graph-filters { display: flex; gap: 4px; }
+.graph-filter-chip { padding: 2px 7px; border: 1px solid #d5cfc3; border-radius: 12px; background: transparent; font-size: 8px; font-weight: 600; color: #5a6065; cursor: pointer; }
+.graph-filter-chip.is-active { background: #234e38; color: #fff; border-color: #234e38; }
+.graph-controls { display: flex; gap: 4px; }
+.graph-controls button { width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid #d5cfc3; border-radius: 6px; background: #fff; font-size: 11px; font-weight: 700; color: #4b5563; cursor: pointer; }
+.graph-controls button:hover { background: #f3f4f6; }
+.graph-canvas { flex: 1; width: 100%; height: 100%; cursor: grab; user-select: none; }
+.graph-canvas:active { cursor: grabbing; }
+.graph-edge-group { cursor: pointer; }
+.graph-edge-group:hover line { stroke: #0f766e; stroke-width: 2.5px; }
+.graph-node-group { cursor: pointer; transition: transform 0.1s; }
+.node-circle { transition: r 0.15s, stroke-width 0.15s; }
+.graph-node-group.is-selected .node-circle { stroke: #14b8a6; stroke-width: 3.5px; filter: drop-shadow(0 2px 6px rgba(20,184,166,0.3)); }
+.node-label-caption { font-family: Georgia, serif; }
+.graph-footer-hint { font-size: 7.5px; color: #8c8f89; padding: 4px 8px; background: rgba(255,255,255,0.8); border-top: 1px solid #eeebe3; text-align: center; }
+
 @media (max-width: 1120px) {
   .app-shell { grid-template-columns: 260px minmax(0, 1fr); }
   .people-panel { grid-column: 1; grid-row: 1 / span 2; display: none; }

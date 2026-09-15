@@ -162,6 +162,20 @@ async function installApi(page, state) {
       return;
     }
 
+    if (pathname === "/api/graph") {
+      const graph = state.graph || {
+        nodes: state.people.map((p) => ({
+          id: p.name,
+          label: p.name,
+          type: "person",
+          mentions: p.mentions || 1,
+        })),
+        edges: [],
+      };
+      await route.fulfill({ json: graph });
+      return;
+    }
+
     if (pathname === "/api/sessions" && method === "GET") {
       await route.fulfill({ json: { sessions: state.sessions, next_cursor: null } });
       return;
@@ -590,4 +604,43 @@ test.describe("Connectivity and interaction resilience", () => {
     await expect(page.locator(".message.assistant .answer-text")).toContainText("Jordan owns the plan");
     await expect(page.locator(".message.user")).toHaveCount(1);
   });
+
+  test("switches to Persona Graph, renders interactive network nodes, and scopes chat on click", async ({ page }) => {
+    const doc = documentRecord("doc-1", "org-chart.txt", ["Robert Smith", "Maya Patel"]);
+    const state = createApiState({
+      documents: [doc],
+      people: [personRecord("Robert Smith"), personRecord("Maya Patel")],
+    });
+    state.graph = {
+      nodes: [
+        { id: "Robert Smith", label: "Robert Smith", type: "person", mentions: 4 },
+        { id: "Acme Corp", label: "Acme Corp", type: "organization", mentions: 1 },
+      ],
+      edges: [
+        { id: "e1", source: "Robert Smith", target: "Acme Corp", relation: "CTO at", document_id: "doc-1" },
+      ],
+    };
+    await openApp(page, state);
+
+    // Switch to Persona Graph tab
+    const graphTab = page.getByRole("tab", { name: /Persona Graph/i });
+    await expect(graphTab).toBeVisible();
+    await graphTab.click();
+
+    // Verify SVG canvas and nodes are rendered
+    await expect(page.locator(".graph-canvas")).toBeVisible();
+    await expect(page.locator(".graph-node-group")).toHaveCount(2);
+    await expect(page.locator(".graph-node-group", { hasText: "Robert Smith" })).toBeVisible();
+    await expect(page.locator(".graph-node-group", { hasText: "Acme Corp" })).toBeVisible();
+    await expect(page.locator(".edge-label-text")).toContainText("CTO at");
+
+    // Click on Robert Smith node to scope chat
+    await page.locator(".graph-node-group", { hasText: "Robert Smith" }).click();
+    await expect(page.locator(".graph-node-group.is-selected")).toBeVisible();
+
+    // Switch back to Subjects tab and verify selection persisted
+    await page.getByRole("tab", { name: /Subjects/i }).click();
+    await expect(page.locator(".person-card.is-selected")).toBeVisible();
+  });
 });
+

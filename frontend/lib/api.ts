@@ -38,6 +38,28 @@ export type PersonRecord = {
   canonical_id?: string;
 };
 
+export type GraphNode = {
+  id: string;
+  label: string;
+  type: string;
+  mentions?: number;
+  canonical_id?: string;
+  aliases?: string[];
+};
+
+export type GraphEdge = {
+  id: string;
+  source: string;
+  target: string;
+  relation: string;
+  document_id?: string;
+};
+
+export type GraphData = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+};
+
 export type Source = {
   index: number;
   document_id: string;
@@ -253,4 +275,17 @@ export async function streamChat(
     reader.releaseLock();
   }
 }
+
+export async function fetchGraph(documentId?: string, person?: string): Promise<GraphData> {
+  const params = new URLSearchParams();
+  if (documentId && documentId !== "all") params.set("document_id", documentId);
+  if (person) params.set("person", person);
+  const qs = params.toString();
+  const response = await fetch(`/api/graph${qs ? `?${qs}` : ""}`);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response, "Failed to load relationship graph"));
+  }
+  return response.json();
+}
+
 

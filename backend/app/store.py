@@ -10,9 +10,10 @@ from typing import Any
 from uuid import uuid4
 
 from .database import DatabaseConnection, connect, is_postgresql_url, run_alembic_upgrade
-from .entity_resolution import cluster_people, parse_name_parts, slugify_name
+from .entity_resolution import cluster_people, get_person_aliases, parse_name_parts, slugify_name
 from .extraction import Chunk
 from .migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
+from .relationship_extraction import extract_relationships_from_text
 
 
 DEFAULT_INDEX_STATUS = "pending"
@@ -115,11 +116,11 @@ class Store:
                     for chunk in chunks
                 ],
             )
+            inserted_chunks = connection.execute(
+                "SELECT id, content FROM chunks WHERE document_id = ? ORDER BY ordinal",
+                (document_id,),
+            ).fetchall()
             if self.database_component == "sqlite":
-                inserted_chunks = connection.execute(
-                    "SELECT id, content FROM chunks WHERE document_id = ? ORDER BY ordinal",
-                    (document_id,),
-                ).fetchall()
                 connection.executemany(
                     """INSERT INTO chunks_fts (content, document_id, chunk_id)
                     VALUES (?, ?, ?)""",
@@ -138,6 +139,30 @@ class Store:
                     for name, mentions in people.items()
                 ],
             )
+
+            # Extract and persist entity relationships
+            rels_to_insert = []
+            for row in inserted_chunks:
+                cid = row["id"]
+                content = row["content"]
+                extracted_rels = extract_relationships_from_text(content, known_people=set(people.keys()))
+                for rel in extracted_rels:
+                    rels_to_insert.append((
+                        document_id,
+                        cid,
+                        rel.source_entity,
+                        rel.target_entity,
+                        rel.relation,
+                        rel.source_type,
+                        rel.target_type,
+                    ))
+            if rels_to_insert:
+                connection.executemany(
+                    """INSERT INTO entity_relationships
+                    (document_id, chunk_id, source_entity, target_entity, relation, source_type, target_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    rels_to_insert,
+                )
         return {
             "id": document_id,
             "filename": filename,
@@ -591,6 +616,7 @@ class Store:
             )
             if self.database_component == "sqlite":
                 connection.execute("DELETE FROM chunks_fts WHERE document_id = ?", (document_id,))
+            connection.execute("DELETE FROM entity_relationships WHERE document_id = ?", (document_id,))
             connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
         try:
             # Retry every queued path while a deletion request has already paid
@@ -747,4 +773,109 @@ class Store:
         except Exception as exc:
             logger.warning("FTS5 search failed: %s", exc)
             return []
+
+    def get_graph(
+        self,
+        document_ids: Iterable[str] | None = None,
+        owner_id: str | None = None,
+        person: str | None = None,
+    ) -> dict[str, Any]:
+        doc_scope = list(document_ids or [])
+        clauses = []
+        params: list[Any] = []
+        if owner_id:
+            clauses.append("documents.owner_id = ?")
+            params.append(owner_id)
+        if doc_scope:
+            clauses.append(f"documents.id IN ({','.join('?' for _ in doc_scope)})")
+            params.extend(doc_scope)
+
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with self.connect() as connection:
+            rel_rows = connection.execute(
+                f"""SELECT entity_relationships.*
+                FROM entity_relationships
+                JOIN documents ON documents.id = entity_relationships.document_id
+                {where_clause}
+                ORDER BY entity_relationships.id ASC""",
+                params,
+            ).fetchall()
+
+        # Retrieve people in scoped documents
+        scoped_people = self.list_people(document_ids=doc_scope if doc_scope else None, owner_id=owner_id)
+
+        nodes_map: dict[str, dict[str, Any]] = {}
+        for p in scoped_people:
+            name = p["name"]
+            nodes_map[name.lower()] = {
+                "id": name,
+                "label": name,
+                "type": "person",
+                "mentions": p.get("mentions", 1),
+                "canonical_id": p.get("canonical_id", ""),
+                "aliases": p.get("aliases", [name]),
+            }
+
+        edges: list[dict[str, Any]] = []
+        for r in rel_rows:
+            s_entity = r["source_entity"]
+            t_entity = r["target_entity"]
+            s_key = s_entity.lower()
+            t_key = t_entity.lower()
+
+            if s_key not in nodes_map:
+                nodes_map[s_key] = {
+                    "id": s_entity,
+                    "label": s_entity,
+                    "type": r["source_type"] or "person",
+                    "mentions": 1,
+                }
+            if t_key not in nodes_map:
+                nodes_map[t_key] = {
+                    "id": t_entity,
+                    "label": t_entity,
+                    "type": r["target_type"] or "entity",
+                    "mentions": 1,
+                }
+
+            edges.append({
+                "id": str(r["id"]),
+                "source": nodes_map[s_key]["id"],
+                "target": nodes_map[t_key]["id"],
+                "relation": r["relation"],
+                "document_id": r["document_id"],
+            })
+
+        if person:
+            target_aliases = [a.lower() for a in get_person_aliases(person, scoped_people)]
+            matching_node_ids = {
+                n["id"] for n in nodes_map.values()
+                if n["label"].lower() in target_aliases or n["id"].lower() in target_aliases
+            }
+            if matching_node_ids:
+                filtered_edges = [
+                    e for e in edges
+                    if e["source"] in matching_node_ids or e["target"] in matching_node_ids
+                ]
+                connected_node_ids = set(matching_node_ids)
+                for e in filtered_edges:
+                    connected_node_ids.add(e["source"])
+                    connected_node_ids.add(e["target"])
+
+                filtered_nodes = [n for n in nodes_map.values() if n["id"] in connected_node_ids]
+                return {
+                    "nodes": filtered_nodes,
+                    "edges": filtered_edges,
+                }
+            else:
+                return {
+                    "nodes": [],
+                    "edges": [],
+                }
+
+        return {
+            "nodes": list(nodes_map.values()),
+            "edges": edges,
+        }
 
