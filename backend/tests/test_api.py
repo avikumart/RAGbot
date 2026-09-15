@@ -22,13 +22,14 @@ Elliot Chen manages the vendor relationship and presents progress every Friday.
 """
 
 
-def client_with_sample(tmp_path):
+def client_with_sample(tmp_path, headers: dict | None = None):
     app = create_app(tmp_path)
     client = TestClient(app)
     client.__enter__()
     response = client.post(
         "/api/documents",
         files={"file": ("people-notes.txt", SAMPLE, "text/plain")},
+        headers=headers,
     )
     assert response.status_code == 201, response.text
     return client, response.json()
@@ -291,8 +292,8 @@ def test_empty_library_and_unsupported_file_are_clear(tmp_path):
 
 def test_sessions_are_owned_persistent_and_idempotent(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTH_PROXY_SECRET", "test-proxy-secret")
-    client, document = client_with_sample(tmp_path)
     alice, bob = owner_headers("alice@example.com"), owner_headers("bob@example.com")
+    client, document = client_with_sample(tmp_path, headers=alice)
     try:
         created = client.post(
             "/api/sessions",
@@ -386,7 +387,7 @@ class FakeApiVectors:
         self.indexed.append(document_id)
         return 1, 0
 
-    def search(self, question, document_ids, limit):
+    def search(self, question, document_ids, limit, owner_id=None):
         return self.candidates[:limit]
 
     def delete_document(self, document_id):
@@ -397,7 +398,7 @@ class FailingApiVectors(FakeApiVectors):
     def index_document(self, document_id):
         raise RuntimeError("Private host qdrant.internal rejected token=secret-value")
 
-    def search(self, question, document_ids, limit):
+    def search(self, question, document_ids, limit, owner_id=None):
         raise RuntimeError("Vector search is unavailable")
 
 
@@ -781,5 +782,93 @@ def test_chat_sse_streaming_idempotent_replay(tmp_path):
         assert complete2["answer"] == complete1["answer"]
     finally:
         client.__exit__(None, None, None)
+
+
+def test_multi_tenant_document_and_people_isolation(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_PROXY_SECRET", "test-proxy-secret")
+    app = create_app(tmp_path)
+    alice = owner_headers("alice@example.com")
+    bob = owner_headers("bob@example.com")
+
+    with TestClient(app) as client:
+        # Unauthenticated requests are rejected when proxy secret is set
+        assert client.get("/api/documents").status_code == 401
+        assert client.get("/api/people").status_code == 401
+        assert client.post("/api/documents", files={"file": ("doc.txt", "content", "text/plain")}).status_code == 401
+        assert client.delete("/api/documents/doc-1").status_code == 401
+        assert client.post("/api/chat", json={"message": "hello"}).status_code == 401
+
+        # Alice uploads a document
+        alice_sample = "Alice Smith leads the platform engineering team. Contact: alice@example.com"
+        r_alice = client.post(
+            "/api/documents",
+            headers=alice,
+            files={"file": ("alice-notes.txt", alice_sample, "text/plain")},
+        )
+        assert r_alice.status_code == 201
+        alice_doc = r_alice.json()
+
+        # Bob uploads a document
+        bob_sample = "Bob Jones manages product delivery and sprint operations. Contact: bob@example.com"
+        r_bob = client.post(
+            "/api/documents",
+            headers=bob,
+            files={"file": ("bob-notes.txt", bob_sample, "text/plain")},
+        )
+        assert r_bob.status_code == 201
+        bob_doc = r_bob.json()
+
+        # Listing documents is isolated per tenant
+        alice_docs = client.get("/api/documents", headers=alice).json()
+        assert len(alice_docs) == 1
+        assert alice_docs[0]["id"] == alice_doc["id"]
+
+        bob_docs = client.get("/api/documents", headers=bob).json()
+        assert len(bob_docs) == 1
+        assert bob_docs[0]["id"] == bob_doc["id"]
+
+        # People listing is isolated per tenant
+        alice_people = client.get("/api/people", headers=alice).json()
+        alice_names = [p["name"] for p in alice_people]
+        assert "Alice Smith" in alice_names
+        assert "Bob Jones" not in alice_names
+
+        bob_people = client.get("/api/people", headers=bob).json()
+        bob_names = [p["name"] for p in bob_people]
+        assert "Bob Jones" in bob_names
+        assert "Alice Smith" not in bob_names
+
+        # Bob cannot delete Alice's document
+        delete_cross = client.delete(f"/api/documents/{alice_doc['id']}", headers=bob)
+        assert delete_cross.status_code == 404
+
+        # Verify Alice's document still exists
+        assert len(client.get("/api/documents", headers=alice).json()) == 1
+
+        # Bob cannot scope chat to Alice's document
+        chat_cross = client.post(
+            "/api/chat",
+            headers=bob,
+            json={"message": "Who is Alice?", "document_ids": [alice_doc["id"]]},
+        )
+        assert chat_cross.status_code == 404
+
+        # Bob's broad chat cannot see Alice's information
+        chat_bob = client.post(
+            "/api/chat",
+            headers=bob,
+            json={"message": "Who is Alice Smith?"},
+        )
+        assert chat_bob.status_code == 200
+        assert alice_doc["id"] not in [src["document_id"] for src in chat_bob.json()["sources"]]
+
+        # Alice deletes her document
+        delete_alice = client.delete(f"/api/documents/{alice_doc['id']}", headers=alice)
+        assert delete_alice.status_code == 200
+        assert len(client.get("/api/documents", headers=alice).json()) == 0
+
+        # Bob's document remains intact
+        assert len(client.get("/api/documents", headers=bob).json()) == 1
+
 
 

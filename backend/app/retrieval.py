@@ -149,12 +149,18 @@ def lexical_candidates(
     limit: int,
     store: Store | None = None,
     document_ids: list[str] | None = None,
+    owner_id: str | None = None,
 ) -> list[RankedChunk]:
     if not chunks:
         return []
 
     if store is not None and getattr(store, "database_component", "") == "sqlite":
-        fts_hits = store.search_fts(question + " " + " ".join(people), document_ids=document_ids, limit=limit)
+        fts_hits = store.search_fts(
+            question + " " + " ".join(people),
+            document_ids=document_ids,
+            limit=limit,
+            owner_id=owner_id,
+        )
         if fts_hits:
             chunk_by_id = {int(c["id"]): c for c in chunks}
             scored: list[RankedChunk] = []
@@ -230,9 +236,10 @@ def hybrid_retrieve(
     vector_limit: int = 20,
     reranker: RerankerService | None = None,
     history: list[dict] | None = None,
+    owner_id: str | None = None,
 ) -> tuple[list[str], list[dict], str]:
-    chunks = store.get_chunks(document_ids)
-    known_people = store.list_people(document_ids)
+    chunks = store.get_chunks(document_ids, owner_id=owner_id)
+    known_people = store.list_people(document_ids, owner_id=owner_id)
     standalone_query, people = reformulate_query(
         question, history=history, known_people=known_people, explicit_person=explicit_person
     )
@@ -240,19 +247,29 @@ def hybrid_retrieve(
         return people, [], "lexical"
 
     lexical = lexical_candidates(
-        chunks, standalone_query, people, lexical_limit, store=store, document_ids=document_ids
+        chunks,
+        standalone_query,
+        people,
+        lexical_limit,
+        store=store,
+        document_ids=document_ids,
+        owner_id=owner_id,
     )
     vector: list[RankedChunk] = []
     retrieval_mode = "lexical"
     if vector_service and vector_service.enabled:
         try:
-            raw_vector = vector_service.search(standalone_query, document_ids, vector_limit)
+            raw_vector = vector_service.search(
+                standalone_query, document_ids, vector_limit, owner_id=owner_id
+            )
             # Qdrant is derived state: only candidates still present in scoped PostgreSQL
             # rows are eligible for answers and citations.
             valid = {
                 int(chunk["id"]): chunk
                 for chunk in store.get_chunks_by_ids(
-                    [candidate.chunk_id for candidate in raw_vector], document_ids
+                    [candidate.chunk_id for candidate in raw_vector],
+                    document_ids,
+                    owner_id=owner_id,
                 )
             }
             vector = [

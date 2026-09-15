@@ -458,3 +458,81 @@ def test_fts5_indexing_and_search(tmp_path):
     assert store.delete_document("fts-doc-1")
     assert len(store.search_fts("Quantum computing")) == 0
 
+
+def test_store_multi_tenant_document_isolation(tmp_path):
+    store = Store(tmp_path)
+    store.initialize()
+
+    path_a = tmp_path / "uploads" / "doc_a.txt"
+    path_a.parent.mkdir(parents=True, exist_ok=True)
+    path_a.write_text("Alice document content.")
+
+    path_b = tmp_path / "uploads" / "doc_b.txt"
+    path_b.write_text("Bob document content.")
+
+    store.add_document(
+        document_id="doc-alice",
+        filename="doc_a.txt",
+        content_type="text/plain",
+        stored_path=path_a,
+        digest="digest-a",
+        size_bytes=22,
+        chunks=[
+            Chunk(ordinal=0, page=None, content="Alice specializes in distributed systems.", people=("Alice Smith",))
+        ],
+        people={"Alice Smith": 1},
+        owner_id="owner-alice",
+    )
+
+    store.add_document(
+        document_id="doc-bob",
+        filename="doc_b.txt",
+        content_type="text/plain",
+        stored_path=path_b,
+        digest="digest-b",
+        size_bytes=20,
+        chunks=[
+            Chunk(ordinal=0, page=None, content="Bob works on compiler optimization.", people=("Bob Jones",))
+        ],
+        people={"Bob Jones": 1},
+        owner_id="owner-bob",
+    )
+
+    # Document listing is scoped by owner
+    alice_docs = store.list_documents(owner_id="owner-alice")
+    bob_docs = store.list_documents(owner_id="owner-bob")
+    assert [d["id"] for d in alice_docs] == ["doc-alice"]
+    assert [d["id"] for d in bob_docs] == ["doc-bob"]
+
+    # Document retrieval by ID is scoped by owner
+    assert store.get_document("doc-alice", owner_id="owner-alice") is not None
+    assert store.get_document("doc-alice", owner_id="owner-bob") is None
+
+    # People listing is scoped by owner
+    alice_people = store.list_people(owner_id="owner-alice")
+    bob_people = store.list_people(owner_id="owner-bob")
+    assert [p["name"] for p in alice_people] == ["Alice Smith"]
+    assert [p["name"] for p in bob_people] == ["Bob Jones"]
+
+    # Chunks are scoped by owner
+    alice_chunks = store.get_chunks(owner_id="owner-alice")
+    bob_chunks = store.get_chunks(owner_id="owner-bob")
+    assert len(alice_chunks) == 1 and alice_chunks[0]["document_id"] == "doc-alice"
+    assert len(bob_chunks) == 1 and bob_chunks[0]["document_id"] == "doc-bob"
+
+    # FTS search is scoped by owner
+    alice_fts = store.search_fts("systems", owner_id="owner-alice")
+    bob_fts = store.search_fts("systems", owner_id="owner-bob")
+    assert len(alice_fts) == 1 and alice_fts[0]["document_id"] == "doc-alice"
+    assert len(bob_fts) == 0
+
+    # Cross-tenant deletion fails
+    assert not store.delete_document("doc-alice", owner_id="owner-bob")
+    assert store.get_document("doc-alice", owner_id="owner-alice") is not None
+
+    # Authorized deletion succeeds
+    assert store.delete_document("doc-alice", owner_id="owner-alice")
+    assert store.get_document("doc-alice", owner_id="owner-alice") is None
+    assert len(store.list_people(owner_id="owner-alice")) == 0
+
+

@@ -21,6 +21,7 @@ TABLE_COLUMNS = {
         "size_bytes",
         "uploaded_at",
         "chunk_count",
+        "owner_id",
     ),
     "chunks": ("id", "document_id", "ordinal", "page", "content", "people_json"),
     "people": ("document_id", "name", "normalized", "mentions"),
