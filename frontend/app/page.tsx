@@ -274,7 +274,7 @@ export default function Home() {
     const rawFiles = Array.isArray(filesInput) ? filesInput : [filesInput];
     if (!rawFiles.length) return;
 
-    const allowed = [".pdf", ".docx", ".txt", ".md"];
+    const allowed = [".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".xls", ".html", ".htm"];
     const MAX_FILES = 50;
     let files = rawFiles;
     if (files.length > MAX_FILES) {
@@ -290,7 +290,7 @@ export default function Home() {
         name: file.name,
         size: file.size,
         status: isAllowed ? "queued" : "error",
-        error: isAllowed ? null : "Choose a PDF, DOCX, TXT, or Markdown file.",
+        error: isAllowed ? null : "Choose a supported file (PDF, DOCX, TXT, MD, CSV, XLSX, HTML).",
       };
     });
 
@@ -299,7 +299,7 @@ export default function Home() {
 
     const validFiles = newQueueItems.filter((item) => item.status === "queued");
     if (!validFiles.length) {
-      setNotice("Choose a PDF, DOCX, TXT, or Markdown file.");
+      setNotice("Choose a supported file (PDF, DOCX, TXT, MD, CSV, XLSX, HTML).");
       return;
     }
 
@@ -636,6 +636,28 @@ export default function Home() {
     question: `What should I know about ${person.name}?`,
   }));
 
+  async function importUrl(url: string) {
+    if (!url.trim()) return;
+    setUploading(true);
+    setNotice(null);
+    try {
+      const doc = await api<DocumentRecord>("/api/documents/url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: url.trim() }),
+      });
+      await refreshLibrary();
+      setSelectedDocument(doc.id);
+      setSelectedPerson(null);
+      setConnected(true);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Failed to import URL.";
+      setNotice(msg);
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <DocumentLibrary
@@ -647,6 +669,7 @@ export default function Home() {
         checkingStatus={checkingStatus}
         fileInput={fileInput}
         onUpload={(files) => void uploadDocuments(files)}
+        onImportUrl={(url) => void importUrl(url)}
         onCheckStatus={() => void checkDocumentStatus()}
         onSelectDocument={selectDocument}
         onRemoveDocument={(document) => void removeDocument(document)}

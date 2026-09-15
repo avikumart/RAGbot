@@ -7,7 +7,15 @@ function humanSize(bytes) {
 }
 
 function documentKind(filename) {
-  return filename.split(".").pop()?.toUpperCase() || "DOC";
+  const ext = filename.split(".").pop()?.toLowerCase() || "";
+  if (ext === "csv") return "CSV";
+  if (ext === "xlsx" || ext === "xls") return "XLSX";
+  if (ext === "html" || ext === "htm") return "WEB";
+  if (ext === "pdf") return "PDF";
+  if (ext === "docx" || ext === "doc") return "DOC";
+  if (ext === "md") return "MD";
+  if (ext === "txt") return "TXT";
+  return ext.toUpperCase() || "DOC";
 }
 
 export function UploadQueue({ items = [], onRetry = () => {}, onClear = () => {} }) {
@@ -62,7 +70,7 @@ export function UploadQueue({ items = [], onRetry = () => {}, onClear = () => {}
           },
           React.createElement(
             "span",
-            { className: "file-badge upload-queue-badge" },
+            { className: `file-badge upload-queue-badge is-${documentKind(item.name).toLowerCase()}` },
             documentKind(item.name)
           ),
           React.createElement(

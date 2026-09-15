@@ -10,7 +10,13 @@ from docx import Document
 from pypdf import PdfReader
 
 
-SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
+import csv
+import zipfile
+import xml.etree.ElementTree as ET
+
+from .ocr import extract_page_ocr_text
+
+SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf", ".docx", ".csv", ".xlsx", ".html", ".htm"}
 HONORIFIC_PATTERN = re.compile(
     r"\b(?:Dr|Mr|Mrs|Ms|Miss|Prof|Professor)\.?\s+"
     r"([A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?(?:\s+[A-Z][a-z]+(?:[-'][A-Z]?[a-z]+)?){1,2})"
@@ -58,21 +64,106 @@ def normalize_space(text: str) -> str:
     return text.strip()
 
 
+def _extract_csv(payload: bytes) -> str:
+    text = payload.decode("utf-8-sig", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    rows = [row for row in reader if any(cell.strip() for cell in row)]
+    if not rows:
+        return ""
+    headers = [col.strip() for col in rows[0]]
+    formatted_rows = []
+    for row_idx, row in enumerate(rows[1:], start=1):
+        cells = []
+        for i, cell in enumerate(row):
+            val = cell.strip()
+            if not val:
+                continue
+            header = headers[i] if i < len(headers) and headers[i] else f"Column {i+1}"
+            cells.append(f"{header}: {val}")
+        if cells:
+            formatted_rows.append(f"Row {row_idx}: " + " | ".join(cells))
+    return "\n".join(formatted_rows) if formatted_rows else "\n".join(" | ".join(headers) for _ in [1])
+
+
+def _extract_xlsx(payload: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            tree = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in tree.findall(".//{*}si"):
+                parts = [t.text or "" for t in si.findall(".//{*}t")]
+                shared_strings.append("".join(parts))
+
+        sheet_names = sorted(n for n in zf.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"))
+        all_sheets: list[str] = []
+        for sname in sheet_names:
+            tree = ET.fromstring(zf.read(sname))
+            rows_data: list[list[str]] = []
+            for row in tree.findall(".//{*}row"):
+                row_cells: list[str] = []
+                for c in row.findall(".//{*}c"):
+                    t = c.attrib.get("t")
+                    v = c.find("{*}v")
+                    val = ""
+                    if v is not None and v.text is not None:
+                        if t == "s":
+                            idx = int(v.text)
+                            val = shared_strings[idx] if idx < len(shared_strings) else ""
+                        else:
+                            val = v.text
+                    elif c.find("{*}is/{*}t") is not None:
+                        val = c.find("{*}is/{*}t").text or ""
+                    row_cells.append(val.strip())
+                if any(row_cells):
+                    rows_data.append(row_cells)
+
+            if rows_data:
+                headers = rows_data[0]
+                sheet_lines: list[str] = []
+                for row_idx, row in enumerate(rows_data[1:], start=1):
+                    cells: list[str] = []
+                    for i, cell in enumerate(row):
+                        if not cell:
+                            continue
+                        header = headers[i] if i < len(headers) and headers[i] else f"Column {i+1}"
+                        cells.append(f"{header}: {cell}")
+                    if cells:
+                        sheet_lines.append(f"Row {row_idx}: " + " | ".join(cells))
+                if sheet_lines:
+                    all_sheets.append("\n".join(sheet_lines))
+        return "\n\n".join(all_sheets)
+
+
 def extract_pages(filename: str, payload: bytes) -> list[ExtractedPage]:
     suffix = Path(filename).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
-        raise ExtractionError("Supported formats are PDF, DOCX, TXT, and Markdown.")
+        raise ExtractionError("Supported formats are PDF, DOCX, TXT, Markdown, CSV, XLSX, and HTML.")
 
     try:
         if suffix in {".txt", ".md"}:
             text = payload.decode("utf-8-sig")
             pages = [ExtractedPage(page=None, text=normalize_space(text))]
+        elif suffix == ".csv":
+            text = _extract_csv(payload)
+            pages = [ExtractedPage(page=None, text=normalize_space(text))]
+        elif suffix in {".xlsx", ".xls"}:
+            text = _extract_xlsx(payload)
+            pages = [ExtractedPage(page=None, text=normalize_space(text))]
+        elif suffix in {".html", ".htm"}:
+            from .html_scraper import clean_html
+
+            _, text = clean_html(payload.decode("utf-8-sig", errors="replace"))
+            pages = [ExtractedPage(page=None, text=normalize_space(text))]
         elif suffix == ".pdf":
             reader = PdfReader(io.BytesIO(payload))
-            pages = [
-                ExtractedPage(page=index + 1, text=normalize_space(page.extract_text() or ""))
-                for index, page in enumerate(reader.pages)
-            ]
+            pages = []
+            for index, page in enumerate(reader.pages):
+                text = normalize_space(page.extract_text() or "")
+                if not text:
+                    ocr_text = extract_page_ocr_text(page)
+                    if ocr_text:
+                        text = normalize_space(ocr_text)
+                pages.append(ExtractedPage(page=index + 1, text=text))
         else:
             document = Document(io.BytesIO(payload))
             text = "\n\n".join(paragraph.text for paragraph in document.paragraphs)

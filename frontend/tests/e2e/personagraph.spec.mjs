@@ -295,7 +295,7 @@ test.describe("First document workflow", () => {
 });
 
 test.describe("Upload validation", () => {
-  for (const filename of ["picture.png", "spreadsheet.csv", "archive.zip"]) {
+  for (const filename of ["picture.png", "audio.mp3", "archive.zip"]) {
     test(`rejects unsupported ${filename} before it enters the library`, async ({ page }) => {
       const state = createApiState();
       await openApp(page, state);
@@ -306,12 +306,34 @@ test.describe("Upload validation", () => {
         buffer: Buffer.from("not a supported document"),
       });
 
-      await expect(page.locator(".notice")).toContainText("Choose a PDF, DOCX, TXT, or Markdown file.");
+      await expect(page.locator(".notice")).toContainText("Choose a supported file");
       await expect(page.getByText("Your uploaded documents will appear here.")).toBeVisible();
       await expect(page.getByRole("textbox", { name: "Your question" })).toBeDisabled();
       expect(state.uploadRequests).toBe(0);
     });
   }
+
+  test("accepts and displays CSV document in library with CSV badge", async ({ page }) => {
+    const csvDoc = documentRecord("doc-csv-1", "contacts.csv", ["Alice Walker"], {
+      content_type: "text/csv",
+    });
+    const state = createApiState({
+      uploads: [{
+        document: csvDoc,
+        people: [personRecord("Alice Walker")],
+      }],
+    });
+    await openApp(page, state);
+
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "contacts.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("Name,Role\nAlice Walker,Scientist"),
+    });
+
+    await expect(documentButton(page, csvDoc.filename)).toBeVisible();
+    await expect(page.locator(".document-list .file-badge.is-csv")).toBeVisible();
+  });
 
   for (const [name, mimeType, buffer, message] of [
     ["empty.txt", "text/plain", Buffer.alloc(0), "The uploaded document is empty."],

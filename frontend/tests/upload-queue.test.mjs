@@ -32,3 +32,22 @@ test("UploadQueue renders items with their statuses, progress, and retry actions
   assert.match(html, /Unsupported file type/);
   assert.match(html, /Retry/);
 });
+
+test("UploadQueue renders CSV, XLSX, and WEB badges correctly", () => {
+  const items = [
+    { id: "1", name: "data.csv", size: 100, status: "ready" },
+    { id: "2", name: "sheet.xlsx", size: 200, status: "ready" },
+    { id: "3", name: "article.html", size: 300, status: "ready" },
+  ];
+
+  const html = renderToStaticMarkup(
+    React.createElement(UploadQueue, { items, onRetry: () => {}, onClear: () => {} })
+  );
+
+  assert.match(html, /file-badge upload-queue-badge is-csv/);
+  assert.match(html, />CSV</);
+  assert.match(html, /file-badge upload-queue-badge is-xlsx/);
+  assert.match(html, />XLSX</);
+  assert.match(html, /file-badge upload-queue-badge is-web/);
+  assert.match(html, />WEB</);
+});
