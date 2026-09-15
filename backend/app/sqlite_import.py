@@ -24,7 +24,7 @@ TABLE_COLUMNS = {
         "owner_id",
     ),
     "chunks": ("id", "document_id", "ordinal", "page", "content", "people_json"),
-    "people": ("document_id", "name", "normalized", "mentions"),
+    "people": ("document_id", "name", "normalized", "mentions", "canonical_id"),
     "vector_index_state": (
         "document_id",
         "status",

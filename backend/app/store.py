@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from .database import DatabaseConnection, connect, is_postgresql_url, run_alembic_upgrade
+from .entity_resolution import cluster_people, parse_name_parts, slugify_name
 from .extraction import Chunk
 from .migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
 
@@ -124,11 +125,16 @@ class Store:
                     VALUES (?, ?, ?)""",
                     [(row["content"], document_id, str(row["id"])) for row in inserted_chunks],
                 )
+            def derive_canonical_id(raw_name: str) -> str:
+                prefix, core, suffix = parse_name_parts(raw_name)
+                clean_name = " ".join(core) if core else raw_name
+                return slugify_name(clean_name) or "person"
+
             connection.executemany(
-                """INSERT INTO people (document_id, name, normalized, mentions)
-                VALUES (?, ?, ?, ?)""",
+                """INSERT INTO people (document_id, name, normalized, mentions, canonical_id)
+                VALUES (?, ?, ?, ?, ?)""",
                 [
-                    (document_id, name, name.casefold(), mentions)
+                    (document_id, name, name.casefold(), mentions, derive_canonical_id(name))
                     for name, mentions in people.items()
                 ],
             )
@@ -480,15 +486,14 @@ class Store:
         where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connect() as connection:
             rows = connection.execute(
-                f"""SELECT people.normalized, MIN(people.name) AS name, SUM(people.mentions) AS mentions,
-                COUNT(DISTINCT people.document_id) AS document_count
+                f"""SELECT people.name, people.normalized, people.mentions, people.document_id
                 FROM people
                 JOIN documents ON documents.id = people.document_id
-                {where_clause}
-                GROUP BY people.normalized ORDER BY mentions DESC, name ASC""",
+                {where_clause}""",
                 params,
             ).fetchall()
-            return [dict(row) for row in rows]
+            raw_people = [dict(row) for row in rows]
+            return cluster_people(raw_people)
 
     def get_chunks(
         self, document_ids: Iterable[str] | None = None, owner_id: str | None = None
