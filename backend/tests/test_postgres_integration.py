@@ -33,7 +33,7 @@ def clean_postgres():
     yield
 
 
-def add_sample_document(store: Store, document_id: str = "document-1") -> Path:
+def add_sample_document(store: Store, document_id: str = "document-1", owner_id: str = "") -> Path:
     stored_path = store.upload_dir / f"{document_id}.txt"
     stored_path.write_text("Jordan Lee owns the rollout plan.")
     store.add_document(
@@ -52,6 +52,7 @@ def add_sample_document(store: Store, document_id: str = "document-1") -> Path:
             )
         ],
         people={"Jordan Lee": 1},
+        owner_id=owner_id,
     )
     return stored_path
 
@@ -72,7 +73,7 @@ def test_alembic_baseline_and_store_round_trip(tmp_path):
         assert set(TABLE_COLUMNS) | {"alembic_version"} <= tables
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone()["version_num"] == "001_initial_schema"
+        ).fetchone()["version_num"] == "002_multi_tenant_isolation"
 
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         with store.connect() as connection:
@@ -121,7 +122,7 @@ def test_current_sqlite_database_imports_atomically_and_preserves_chunk_ids(tmp_
     sqlite_dir = tmp_path / "legacy"
     source = Store(sqlite_dir)
     source.initialize()
-    add_sample_document(source, "legacy-document")
+    add_sample_document(source, "legacy-document", owner_id="legacy-owner")
     source.set_vector_status("legacy-document", "ready", "test/model")
     session = source.create_chat_session("legacy-owner", topic="Legacy chat")
     source.persist_chat_turn(
@@ -152,6 +153,7 @@ def test_current_sqlite_database_imports_atomically_and_preserves_chunk_ids(tmp_
     target = Store(tmp_path / "target", TEST_POSTGRES_URL)
     assert target.get_chunks()[0]["id"] == 1
     assert target.get_document("legacy-document")["index_status"] == "ready"
+    assert target.get_document("legacy-document")["owner_id"] == "legacy-owner"
     assert target.get_chat_session("legacy-owner", session["id"])["messages"][1][
         "role"
     ] == "assistant"

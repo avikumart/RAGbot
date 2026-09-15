@@ -495,7 +495,7 @@ test.describe("Connectivity and interaction resilience", () => {
     await expect(page.locator(".thinking-message")).toBeVisible();
     await composer.press("Enter");
     await composer.press("Enter");
-    expect(state.chatRequests).toHaveLength(1);
+    await expect.poll(() => state.chatRequests).toHaveLength(1);
 
     releaseChat();
     await expect(page.locator(".message.assistant .answer-text")).toContainText("Jordan owns the plan");

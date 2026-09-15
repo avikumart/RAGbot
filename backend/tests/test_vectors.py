@@ -52,11 +52,13 @@ def test_vector_payload_references_sqlite_without_chunk_text():
         "page": 2,
         "content": "  Jordan  owns the rollout. ",
         "people": ["Jordan Lee"],
+        "owner_id": "test-owner",
     }
     payload = vector_payload(chunk, "test/model")
     assert payload["chunk_id"] == 12
     assert payload["content_hash"] == content_hash("Jordan owns the rollout.")
     assert payload["embedding_model"] == "test/model"
+    assert payload["owner_id"] == "test-owner"
     assert "content" not in payload
 
 
@@ -87,7 +89,7 @@ class FakeVectorService:
     error: Exception | None = None
     seen_scope: list[str] | None = None
 
-    def search(self, question, document_ids, limit):
+    def search(self, question, document_ids, limit, owner_id=None):
         self.seen_scope = document_ids
         if self.error:
             raise self.error

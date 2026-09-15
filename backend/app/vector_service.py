@@ -145,13 +145,17 @@ class VectorService:
             raise
 
     def search(
-        self, question: str, document_ids: list[str] | None, limit: int
+        self,
+        question: str,
+        document_ids: list[str] | None,
+        limit: int,
+        owner_id: str | None = None,
     ) -> list[VectorCandidate]:
         if not self.enabled:
             return []
         self.ensure_ready()
         vector = self._embed([question])[0]
-        return self.vector_store.search(vector, limit, document_ids)
+        return self.vector_store.search(vector, limit, document_ids, owner_id=owner_id)
 
     def delete_document(self, document_id: str) -> None:
         if not self.enabled:

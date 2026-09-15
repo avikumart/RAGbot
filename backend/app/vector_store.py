@@ -24,8 +24,8 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(normalize_embedding_text(content).encode("utf-8")).hexdigest()
 
 
-def vector_payload(chunk: dict, embedding_model: str) -> dict:
-    return {
+def vector_payload(chunk: dict, embedding_model: str, owner_id: str | None = None) -> dict:
+    payload = {
         "record_type": "chunk",
         "document_id": chunk["document_id"],
         "chunk_id": int(chunk["id"]),
@@ -35,6 +35,10 @@ def vector_payload(chunk: dict, embedding_model: str) -> dict:
         "embedding_model": embedding_model,
         "content_hash": content_hash(chunk["content"]),
     }
+    resolved_owner = owner_id or chunk.get("owner_id")
+    if resolved_owner:
+        payload["owner_id"] = str(resolved_owner)
+    return payload
 
 
 @dataclass(frozen=True)
@@ -158,11 +162,19 @@ class QdrantVectorStore:
             self.client.upsert(self.collection, points, wait=True)
 
     def search(
-        self, query_vector: Sequence[float], limit: int, document_ids: list[str] | None
+        self,
+        query_vector: Sequence[float],
+        limit: int,
+        document_ids: list[str] | None,
+        owner_id: str | None = None,
     ) -> list[VectorCandidate]:
         from qdrant_client.models import FieldCondition, Filter, MatchAny, MatchValue
 
         must = [FieldCondition(key="record_type", match=MatchValue(value="chunk"))]
+        if owner_id:
+            must.append(
+                FieldCondition(key="owner_id", match=MatchValue(value=owner_id))
+            )
         if document_ids:
             must.append(
                 FieldCondition(key="document_id", match=MatchAny(any=document_ids))

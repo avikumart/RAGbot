@@ -93,16 +93,17 @@ class Store:
         size_bytes: int,
         chunks: list[Chunk],
         people: dict[str, int],
+        owner_id: str = "",
     ) -> dict:
         uploaded_at = datetime.now(UTC).isoformat()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO documents
-                (id, filename, content_type, stored_path, sha256, size_bytes, uploaded_at, chunk_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (id, filename, content_type, stored_path, sha256, size_bytes, uploaded_at, chunk_count, owner_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     document_id, filename, content_type, str(stored_path), digest,
-                    size_bytes, uploaded_at, len(chunks),
+                    size_bytes, uploaded_at, len(chunks), owner_id,
                 ),
             )
             connection.executemany(
@@ -139,6 +140,7 @@ class Store:
             "uploaded_at": uploaded_at,
             "chunk_count": len(chunks),
             "people": sorted(people),
+            "owner_id": owner_id,
         }
 
     def set_vector_status(
@@ -155,17 +157,24 @@ class Store:
                 (document_id, status, embedding_model, error, datetime.now(UTC).isoformat()),
             )
 
-    def list_documents(self) -> list[dict]:
+    def list_documents(self, owner_id: str | None = None) -> list[dict]:
+        clause = ""
+        params: list[Any] = []
+        if owner_id is not None:
+            clause = "WHERE documents.owner_id = ?"
+            params = [owner_id]
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT documents.*,
+                f"""SELECT documents.*,
                 vector_index_state.status AS stored_index_status,
                 vector_index_state.error AS stored_index_error,
                 vector_index_state.updated_at AS stored_index_updated_at
                 FROM documents
                 LEFT JOIN vector_index_state
                 ON vector_index_state.document_id = documents.id
-                ORDER BY documents.uploaded_at DESC"""
+                {clause}
+                ORDER BY documents.uploaded_at DESC""",
+                params,
             ).fetchall()
             result = []
             for row in rows:
@@ -173,6 +182,7 @@ class Store:
                     "SELECT name FROM people WHERE document_id = ? ORDER BY name",
                     (row["id"],),
                 ).fetchall()
+                row_keys = row.keys() if hasattr(row, "keys") else []
                 result.append(
                     {
                         "id": row["id"],
@@ -182,6 +192,7 @@ class Store:
                         "uploaded_at": row["uploaded_at"],
                         "chunk_count": row["chunk_count"],
                         "people": [person["name"] for person in people],
+                        "owner_id": row["owner_id"] if "owner_id" in row_keys else "",
                         "index_status": row["stored_index_status"] or DEFAULT_INDEX_STATUS,
                         "index_error": (
                             PUBLIC_INDEX_ERROR if row["stored_index_error"] else None
@@ -191,11 +202,11 @@ class Store:
                 )
             return result
 
-    def get_document(self, document_id: str) -> dict | None:
+    def get_document(self, document_id: str, owner_id: str | None = None) -> dict | None:
         return next(
             (
                 document
-                for document in self.list_documents()
+                for document in self.list_documents(owner_id=owner_id)
                 if document["id"] == document_id
             ),
             None,
@@ -454,35 +465,49 @@ class Store:
             "assistant_message": self._chat_message_dict(assistant),
         }
 
-    def list_people(self, document_ids: Iterable[str] | None = None) -> list[dict]:
+    def list_people(
+        self, document_ids: Iterable[str] | None = None, owner_id: str | None = None
+    ) -> list[dict]:
         ids = list(document_ids or [])
-        clause = ""
+        clauses: list[str] = []
         params: list[str] = []
+        if owner_id is not None:
+            clauses.append("documents.owner_id = ?")
+            params.append(owner_id)
         if ids:
-            clause = f"WHERE document_id IN ({','.join('?' for _ in ids)})"
-            params = ids
+            clauses.append(f"people.document_id IN ({','.join('?' for _ in ids)})")
+            params.extend(ids)
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connect() as connection:
             rows = connection.execute(
-                f"""SELECT normalized, MIN(name) AS name, SUM(mentions) AS mentions,
-                COUNT(DISTINCT document_id) AS document_count
-                FROM people {clause}
-                GROUP BY normalized ORDER BY mentions DESC, name ASC""",
+                f"""SELECT people.normalized, MIN(people.name) AS name, SUM(people.mentions) AS mentions,
+                COUNT(DISTINCT people.document_id) AS document_count
+                FROM people
+                JOIN documents ON documents.id = people.document_id
+                {where_clause}
+                GROUP BY people.normalized ORDER BY mentions DESC, name ASC""",
                 params,
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def get_chunks(self, document_ids: Iterable[str] | None = None) -> list[dict]:
+    def get_chunks(
+        self, document_ids: Iterable[str] | None = None, owner_id: str | None = None
+    ) -> list[dict]:
         ids = list(document_ids or [])
-        clause = ""
+        clauses: list[str] = []
         params: list[str] = []
+        if owner_id is not None:
+            clauses.append("documents.owner_id = ?")
+            params.append(owner_id)
         if ids:
-            clause = f"WHERE chunks.document_id IN ({','.join('?' for _ in ids)})"
-            params = ids
+            clauses.append(f"chunks.document_id IN ({','.join('?' for _ in ids)})")
+            params.extend(ids)
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connect() as connection:
             rows = connection.execute(
-                f"""SELECT chunks.*, documents.filename
+                f"""SELECT chunks.*, documents.filename, documents.owner_id
                 FROM chunks JOIN documents ON documents.id = chunks.document_id
-                {clause} ORDER BY documents.uploaded_at DESC, chunks.ordinal ASC""",
+                {where_clause} ORDER BY documents.uploaded_at DESC, chunks.ordinal ASC""",
                 params,
             ).fetchall()
             return [
@@ -494,7 +519,10 @@ class Store:
             ]
 
     def get_chunks_by_ids(
-        self, chunk_ids: Iterable[int], document_ids: Iterable[str] | None = None
+        self,
+        chunk_ids: Iterable[int],
+        document_ids: Iterable[str] | None = None,
+        owner_id: str | None = None,
     ) -> list[dict]:
         ids = list(dict.fromkeys(chunk_ids))
         if not ids:
@@ -502,6 +530,9 @@ class Store:
         document_scope = list(document_ids or [])
         clauses = [f"chunks.id IN ({','.join('?' for _ in ids)})"]
         params: list[str | int] = list(ids)
+        if owner_id is not None:
+            clauses.append("documents.owner_id = ?")
+            params.append(owner_id)
         if document_scope:
             clauses.append(
                 f"chunks.document_id IN ({','.join('?' for _ in document_scope)})"
@@ -509,7 +540,7 @@ class Store:
             params.extend(document_scope)
         with self.connect() as connection:
             rows = connection.execute(
-                f"""SELECT chunks.*, documents.filename
+                f"""SELECT chunks.*, documents.filename, documents.owner_id
                 FROM chunks JOIN documents ON documents.id = chunks.document_id
                 WHERE {' AND '.join(clauses)}""",
                 params,
@@ -522,7 +553,7 @@ class Store:
                 "SELECT 1 FROM documents WHERE id = ?", (document_id,)
             ).fetchone() is not None
 
-    def delete_document(self, document_id: str) -> bool:
+    def delete_document(self, document_id: str, owner_id: str | None = None) -> bool:
         # Deletion ordering is intentional:
         # 1. In one database transaction, durably queue the file path and delete
         #    the authoritative document row (which cascades to related rows).
@@ -530,8 +561,13 @@ class Store:
         # A filesystem failure therefore cannot roll back or misreport an
         # already-committed document deletion; its queue row remains for retry.
         with self.connect() as connection:
+            clause = "WHERE id = ?"
+            params: list[Any] = [document_id]
+            if owner_id is not None:
+                clause += " AND owner_id = ?"
+                params.append(owner_id)
             row = connection.execute(
-                "SELECT stored_path FROM documents WHERE id = ?", (document_id,)
+                f"SELECT stored_path FROM documents {clause}", params
             ).fetchone()
             if not row:
                 return False
@@ -659,7 +695,11 @@ class Store:
         return resolved_path != upload_dir and upload_dir in resolved_path.parents
 
     def search_fts(
-        self, query: str, document_ids: list[str] | None = None, limit: int = 20
+        self,
+        query: str,
+        document_ids: list[str] | None = None,
+        limit: int = 20,
+        owner_id: str | None = None,
     ) -> list[dict]:
         """Query SQLite FTS5 index for full-text search with BM25 ranking."""
         if self.database_component != "sqlite":
@@ -671,14 +711,18 @@ class Store:
 
         fts_query = " OR ".join(f'"{t}"*' for t in terms)
         sql = """
-            SELECT chunk_id, content, document_id, bm25(chunks_fts) AS fts_score
+            SELECT chunks_fts.chunk_id, chunks_fts.content, chunks_fts.document_id, bm25(chunks_fts) AS fts_score
             FROM chunks_fts
+            JOIN documents ON documents.id = chunks_fts.document_id
             WHERE chunks_fts MATCH ?
         """
         params: list[Any] = [fts_query]
+        if owner_id is not None:
+            sql += " AND documents.owner_id = ?"
+            params.append(owner_id)
         if document_ids:
             placeholders = ", ".join("?" for _ in document_ids)
-            sql += f" AND document_id IN ({placeholders})"
+            sql += f" AND chunks_fts.document_id IN ({placeholders})"
             params.extend(document_ids)
         sql += " ORDER BY bm25(chunks_fts) ASC LIMIT ?"
         params.append(limit)

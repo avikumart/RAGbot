@@ -117,7 +117,11 @@ export async function parseApiError(response: Response): Promise<string> {
 }
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const authenticated = path === "/api/chat" || path.startsWith("/api/sessions");
+  const authenticated =
+    path === "/api/chat" ||
+    path.startsWith("/api/sessions") ||
+    path.startsWith("/api/documents") ||
+    path.startsWith("/api/people");
   const baseUrl = authenticated ? AUTHENTICATED_API_URL : API_URL;
   const response = await fetch(`${baseUrl}${path}`, options);
   if (!response.ok) throw new Error(await parseApiError(response));

@@ -173,15 +173,18 @@ def create_app(
         }
 
     @app.get("/api/documents")
-    def documents() -> list[dict]:
-        return store.list_documents()
+    def documents(request: Request) -> list[dict]:
+        owner_id = request_owner(request, settings)
+        return store.list_documents(owner_id=owner_id)
 
     @app.get("/api/people")
-    def people(document_id: list[str] | None = None) -> list[dict]:
-        return store.list_people(document_id)
+    def people(request: Request, document_id: list[str] | None = None) -> list[dict]:
+        owner_id = request_owner(request, settings)
+        return store.list_people(document_id, owner_id=owner_id)
 
     @app.post("/api/documents", status_code=201)
-    async def upload_document(file: UploadFile = File(...)) -> dict:
+    async def upload_document(request: Request, file: UploadFile = File(...)) -> dict:
+        owner_id = request_owner(request, settings)
         filename = Path(file.filename or "document").name
         payload = await file.read(settings.max_upload_bytes + 1)
         if len(payload) > settings.max_upload_bytes:
@@ -209,6 +212,7 @@ def create_app(
                 size_bytes=len(payload),
                 chunks=chunks,
                 people=dict(count_people(chunks)),
+                owner_id=owner_id,
             )
             try:
                 processed, skipped = vectors.index_document(document_id)
@@ -232,14 +236,15 @@ def create_app(
                     document_id,
                     exc,
                 )
-            return store.get_document(document_id) or result
+            return store.get_document(document_id, owner_id=owner_id) or result
         except Exception:
             stored_path.unlink(missing_ok=True)
             raise
 
     @app.delete("/api/documents/{document_id}")
-    def delete_document(document_id: str) -> dict:
-        if not store.delete_document(document_id):
+    def delete_document(document_id: str, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
+        if not store.delete_document(document_id, owner_id=owner_id):
             raise HTTPException(status_code=404, detail="Document not found.")
         try:
             vectors.delete_document(document_id)
@@ -363,8 +368,17 @@ def create_app(
             if scoped_doc_ids is None and session.get("document_ids"):
                 scoped_doc_ids = session.get("document_ids")
 
-        if not store.list_documents():
+        owner_documents = store.list_documents(owner_id=owner_id)
+        if not owner_documents:
             raise HTTPException(status_code=409, detail="Upload a document before asking a question.")
+        owner_doc_ids = {doc["id"] for doc in owner_documents}
+        if scoped_doc_ids is not None:
+            scoped_doc_ids = [doc_id for doc_id in scoped_doc_ids if doc_id in owner_doc_ids]
+            if not scoped_doc_ids:
+                raise HTTPException(status_code=404, detail="Scoped document not found.")
+        else:
+            scoped_doc_ids = list(owner_doc_ids)
+
         identified_people, sources, retrieval_mode = hybrid_retrieve(
             store,
             payload.message,
@@ -376,6 +390,7 @@ def create_app(
             vector_limit=settings.vector_candidate_limit,
             reranker=RerankerService(enabled=settings.reranker_enabled, model_name=settings.reranker_model),
             history=history,
+            owner_id=owner_id,
         )
 
         if is_streaming:
