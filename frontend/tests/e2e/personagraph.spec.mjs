@@ -130,6 +130,24 @@ async function installApi(page, state) {
       return;
     }
 
+    if (pathname === "/api/documents/batch" && method === "POST") {
+      state.batchUploadRequests = (state.batchUploadRequests || 0) + 1;
+      const documents = [];
+      const errors = [];
+      while (state.uploads.length) {
+        const upload = state.uploads.shift();
+        if (upload?.error) {
+          errors.push({ filename: upload.filename || "failed.txt", detail: upload.error.detail });
+        } else if (upload?.document) {
+          state.documents = [...state.documents, upload.document];
+          documents.push(upload.document);
+          if (upload.people) state.people = upload.people;
+        }
+      }
+      await route.fulfill({ json: { documents, errors } });
+      return;
+    }
+
     if (pathname.startsWith("/api/documents/") && method === "DELETE") {
       const documentId = pathname.split("/").pop();
       state.documents = state.documents.filter((document) => document.id !== documentId);
@@ -313,6 +331,55 @@ test.describe("Upload validation", () => {
       expect(state.documents).toHaveLength(0);
     });
   }
+});
+
+test.describe("Batch and multi-file uploads", () => {
+  test("uploads multiple documents in batch and displays upload queue with progress", async ({ page }) => {
+    const doc1 = documentRecord("doc-1", "doc1.txt", ["Jordan Lee"]);
+    const doc2 = documentRecord("doc-2", "doc2.txt", ["Morgan Diaz"]);
+    const state = createApiState({
+      uploads: [
+        { document: doc1, people: [personRecord("Jordan Lee")] },
+        { document: doc2, people: [personRecord("Jordan Lee"), personRecord("Morgan Diaz")] },
+      ],
+    });
+    await openApp(page, state);
+
+    await page.locator('input[type="file"]').setInputFiles([
+      { name: "doc1.txt", mimeType: "text/plain", buffer: Buffer.from("First doc content") },
+      { name: "doc2.txt", mimeType: "text/plain", buffer: Buffer.from("Second doc content") },
+    ]);
+
+    await expect(page.locator(".upload-queue")).toBeVisible();
+    await expect(page.locator(".upload-queue")).toContainText("Upload queue");
+    await expect(page.locator(".upload-queue")).toContainText("doc1.txt");
+    await expect(page.locator(".upload-queue")).toContainText("doc2.txt");
+    await expect(page.locator(".document-list")).toContainText("doc1.txt");
+    await expect(page.locator(".document-list")).toContainText("doc2.txt");
+    expect(state.batchUploadRequests).toBe(1);
+    expect(state.documents).toHaveLength(2);
+  });
+
+  test("shows error badge and retry button for failed files in batch queue", async ({ page }) => {
+    const doc1 = documentRecord("doc-1", "valid.txt", ["Jordan Lee"]);
+    const state = createApiState({
+      uploads: [
+        { document: doc1 },
+        { error: { status: 422, detail: "Empty document content" }, filename: "empty.txt" },
+      ],
+    });
+    await openApp(page, state);
+
+    await page.locator('input[type="file"]').setInputFiles([
+      { name: "valid.txt", mimeType: "text/plain", buffer: Buffer.from("Valid content") },
+      { name: "empty.txt", mimeType: "text/plain", buffer: Buffer.from("") },
+    ]);
+
+    await expect(page.locator(".upload-queue")).toBeVisible();
+    await expect(page.locator(".upload-queue-status.is-error")).toBeVisible();
+    await expect(page.locator(".upload-queue-retry")).toBeVisible();
+    await expect(page.locator(".upload-queue")).toContainText("Empty document content");
+  });
 });
 
 test.describe("Scoped retrieval and citation integrity", () => {

@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { DragEvent, RefObject } from "react";
 import { DocumentIndexStatus } from "@/app/document-index-status.mjs";
 import type { ChatSession, DocumentRecord } from "@/lib/api";
+import { UploadQueue, type QueueItem } from "./upload-queue";
 
 type DocumentLibraryProps = {
   documents: DocumentRecord[];
@@ -13,7 +14,7 @@ type DocumentLibraryProps = {
   uploading: boolean;
   checkingStatus: boolean;
   fileInput: RefObject<HTMLInputElement | null>;
-  onUpload: (file: File) => void;
+  onUpload: (files: File | File[]) => void;
   onCheckStatus: () => void;
   onSelectDocument: (document: DocumentRecord | "all") => void;
   onRemoveDocument: (document: DocumentRecord) => void;
@@ -21,6 +22,9 @@ type DocumentLibraryProps = {
   activeSessionId: string | null;
   onNewConversation: () => void;
   onSelectSession: (sessionId: string) => void;
+  uploadQueue?: QueueItem[];
+  onRetryQueueItem?: (item: QueueItem) => void;
+  onClearQueue?: () => void;
 };
 
 function humanSize(bytes: number) {
@@ -31,6 +35,59 @@ function humanSize(bytes: number) {
 
 function documentKind(filename: string) {
   return filename.split(".").pop()?.toUpperCase() || "DOC";
+}
+
+async function extractFilesFromDataTransfer(dataTransfer: DataTransfer): Promise<File[]> {
+  const items = dataTransfer.items;
+  if (items && items.length > 0) {
+    const entries: unknown[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === "file") {
+        const entry = (item as unknown as { webkitGetAsEntry?: () => unknown }).webkitGetAsEntry
+          ? (item as unknown as { webkitGetAsEntry: () => unknown }).webkitGetAsEntry()
+          : null;
+        if (entry) {
+          entries.push(entry);
+        } else {
+          const file = item.getAsFile();
+          if (file) return Array.from(dataTransfer.files ?? []);
+        }
+      }
+    }
+
+    if (entries.length > 0) {
+      const collected: File[] = [];
+      async function traverse(entry: unknown): Promise<void> {
+        const e = entry as {
+          isFile?: boolean;
+          isDirectory?: boolean;
+          file?: (cb: (f: File) => void, err: () => void) => void;
+          createReader?: () => { readEntries: (cb: (r: unknown[]) => void, err: () => void) => void };
+        };
+        if (e.isFile && e.file) {
+          const f = await new Promise<File | null>((res) => {
+            e.file!((file: File) => res(file), () => res(null));
+          });
+          if (f) collected.push(f);
+        } else if (e.isDirectory && e.createReader) {
+          const reader = e.createReader();
+          const batch = await new Promise<unknown[]>((res) => {
+            reader.readEntries((r: unknown[]) => res(r), () => res([]));
+          });
+          for (const child of batch) {
+            await traverse(child);
+          }
+        }
+      }
+      for (const entry of entries) {
+        await traverse(entry);
+      }
+      if (collected.length > 0) return collected;
+    }
+  }
+
+  return Array.from(dataTransfer.files ?? []);
 }
 
 export function DocumentLibrary({
@@ -49,14 +106,17 @@ export function DocumentLibrary({
   activeSessionId,
   onNewConversation,
   onSelectSession,
+  uploadQueue = [],
+  onRetryQueueItem,
+  onClearQueue,
 }: DocumentLibraryProps) {
   const [dragging, setDragging] = useState(false);
 
-  function onDrop(event: DragEvent<HTMLDivElement>) {
+  async function onDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setDragging(false);
-    const file = event.dataTransfer.files?.[0];
-    if (file) onUpload(file);
+    const files = await extractFilesFromDataTransfer(event.dataTransfer);
+    if (files.length) onUpload(files);
   }
 
   return (
@@ -74,12 +134,12 @@ export function DocumentLibrary({
         onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
         onDragOver={(event) => event.preventDefault()}
         onDragLeave={() => setDragging(false)}
-        onDrop={onDrop}
+        onDrop={(event) => void onDrop(event)}
       >
         <span className="upload-symbol" aria-hidden="true">↑</span>
         <div>
-          <p>{uploading ? "Indexing your document…" : "Add a document"}</p>
-          <span>PDF, DOCX, TXT or MD · 10 MB max</span>
+          <p>{uploading ? "Indexing your documents…" : "Add a document"}</p>
+          <span>PDF, DOCX, TXT or MD · Up to 50 files · 10 MB max</span>
         </div>
         <button
           className="upload-button"
@@ -93,13 +153,22 @@ export function DocumentLibrary({
           ref={fileInput}
           className="visually-hidden"
           type="file"
+          multiple
           accept=".pdf,.docx,.txt,.md"
           onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) onUpload(file);
+            const files = Array.from(event.target.files ?? []);
+            if (files.length) onUpload(files);
           }}
         />
       </div>
+
+      {uploadQueue.length > 0 && (
+        <UploadQueue
+          items={uploadQueue}
+          onRetry={onRetryQueueItem ?? (() => {})}
+          onClear={onClearQueue ?? (() => {})}
+        />
+      )}
 
       <div className="section-heading">
         <span>Library</span>
