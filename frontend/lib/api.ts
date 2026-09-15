@@ -19,6 +19,16 @@ export type DocumentRecord = {
   index_updated_at: string | null;
 };
 
+export type BatchUploadError = {
+  filename: string;
+  detail: string;
+};
+
+export type BatchUploadResponse = {
+  documents: DocumentRecord[];
+  errors: BatchUploadError[];
+};
+
 export type PersonRecord = {
   normalized: string;
   name: string;

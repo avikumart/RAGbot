@@ -387,6 +387,11 @@ class FakeApiVectors:
         self.indexed.append(document_id)
         return 1, 0
 
+    def index_documents(self, document_ids):
+        for doc_id in document_ids:
+            self.indexed.append(doc_id)
+        return {doc_id: (1, 0) for doc_id in document_ids}
+
     def search(self, question, document_ids, limit, owner_id=None):
         return self.candidates[:limit]
 
@@ -396,6 +401,9 @@ class FakeApiVectors:
 
 class FailingApiVectors(FakeApiVectors):
     def index_document(self, document_id):
+        raise RuntimeError("Private host qdrant.internal rejected token=secret-value")
+
+    def index_documents(self, document_ids):
         raise RuntimeError("Private host qdrant.internal rejected token=secret-value")
 
     def search(self, question, document_ids, limit, owner_id=None):
@@ -869,6 +877,73 @@ def test_multi_tenant_document_and_people_isolation(tmp_path, monkeypatch):
 
         # Bob's document remains intact
         assert len(client.get("/api/documents", headers=bob).json()) == 1
+
+
+def test_batch_upload_successful_multiple_files(tmp_path):
+    vectors = FakeApiVectors()
+    app = create_app(tmp_path, vector_service=vectors)
+    with TestClient(app) as client:
+        files = [
+            ("files", ("doc1.txt", "Content of first document. Jordan Lee leads engineering.", "text/plain")),
+            ("files", ("doc2.txt", "Content of second document. Morgan Diaz handles product.", "text/plain")),
+            ("files", ("doc3.md", "# Third document.\nAlex Taylor handles design.", "text/markdown")),
+        ]
+        response = client.post("/api/documents/batch", files=files)
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["documents"]) == 3
+        assert len(payload["errors"]) == 0
+
+        filenames = [d["filename"] for d in payload["documents"]]
+        assert "doc1.txt" in filenames
+        assert "doc2.txt" in filenames
+        assert "doc3.md" in filenames
+
+        # Verify bulk indexing was performed
+        assert len(vectors.indexed) == 3
+
+        # Verify documents appear in library
+        docs = client.get("/api/documents").json()
+        assert len(docs) == 3
+
+        # Verify people extracted across batch
+        people = client.get("/api/people").json()
+        people_names = [p["name"] for p in people]
+        assert "Jordan Lee" in people_names
+        assert "Morgan Diaz" in people_names
+        assert "Alex Taylor" in people_names
+
+
+def test_batch_upload_partial_failure(tmp_path):
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        files = [
+            ("files", ("valid.txt", "Jordan Lee owns the roadmap.", "text/plain")),
+            ("files", ("empty.txt", "", "text/plain")),
+            ("files", ("unsupported.xyz", "Binary random data", "application/octet-stream")),
+        ]
+        response = client.post("/api/documents/batch", files=files)
+        assert response.status_code == 200
+        payload = response.json()
+        assert len(payload["documents"]) == 1
+        assert payload["documents"][0]["filename"] == "valid.txt"
+        assert len(payload["errors"]) == 2
+        error_files = [e["filename"] for e in payload["errors"]]
+        assert "empty.txt" in error_files
+        assert "unsupported.xyz" in error_files
+
+
+def test_batch_upload_exceeds_max_files_limit(tmp_path):
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        files = [
+            ("files", (f"file_{i}.txt", f"Content {i}", "text/plain"))
+            for i in range(51)
+        ]
+        response = client.post("/api/documents/batch", files=files)
+        assert response.status_code == 400
+        assert "50 files" in response.json()["detail"]
+
 
 
 

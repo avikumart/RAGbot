@@ -241,6 +241,102 @@ def create_app(
             stored_path.unlink(missing_ok=True)
             raise
 
+    @app.post("/api/documents/batch", status_code=200)
+    async def upload_documents_batch(
+        request: Request,
+        files: list[UploadFile] = File(...),
+    ) -> dict:
+        owner_id = request_owner(request, settings)
+        if not files:
+            raise HTTPException(status_code=400, detail="No files provided.")
+        if len(files) > 50:
+            raise HTTPException(status_code=400, detail="At most 50 files can be uploaded at once.")
+
+        documents = []
+        errors = []
+        uploaded_doc_ids = []
+
+        for file in files:
+            filename = Path(file.filename or "document").name
+            payload = await file.read(settings.max_upload_bytes + 1)
+            if len(payload) > settings.max_upload_bytes:
+                errors.append({
+                    "filename": filename,
+                    "detail": "The maximum document size is 10 MB.",
+                })
+                continue
+            if not payload:
+                errors.append({
+                    "filename": filename,
+                    "detail": "The uploaded document is empty.",
+                })
+                continue
+            try:
+                pages = extract_pages(filename, payload)
+                chunks = chunk_pages(pages, limit=settings.chunk_size, overlap=settings.chunk_overlap)
+            except ExtractionError as exc:
+                errors.append({
+                    "filename": filename,
+                    "detail": str(exc),
+                })
+                continue
+
+            document_id = uuid4().hex
+            suffix = Path(filename).suffix.lower()
+            safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", Path(filename).stem).strip("-")[:48]
+            stored_path = store.upload_dir / f"{document_id}-{safe_stem or 'document'}{suffix}"
+            stored_path.write_bytes(payload)
+            try:
+                store.add_document(
+                    document_id=document_id,
+                    filename=filename,
+                    content_type=file.content_type or "application/octet-stream",
+                    stored_path=stored_path,
+                    digest=hashlib.sha256(payload).hexdigest(),
+                    size_bytes=len(payload),
+                    chunks=chunks,
+                    people=dict(count_people(chunks)),
+                    owner_id=owner_id,
+                )
+                uploaded_doc_ids.append(document_id)
+            except Exception as exc:
+                stored_path.unlink(missing_ok=True)
+                errors.append({
+                    "filename": filename,
+                    "detail": str(exc),
+                })
+
+        if uploaded_doc_ids:
+            try:
+                if hasattr(vectors, "index_documents"):
+                    vectors.index_documents(uploaded_doc_ids)
+                else:
+                    for doc_id in uploaded_doc_ids:
+                        vectors.index_document(doc_id)
+            except Exception as exc:
+                logger.warning(
+                    "Batch vector indexing failed for %d documents: %s",
+                    len(uploaded_doc_ids),
+                    exc,
+                )
+                for doc_id in uploaded_doc_ids:
+                    store.set_vector_status(
+                        doc_id,
+                        "needs_reindex",
+                        settings.embedding_model,
+                        str(exc)[:500],
+                    )
+
+            for doc_id in uploaded_doc_ids:
+                doc = store.get_document(doc_id, owner_id=owner_id)
+                if doc:
+                    documents.append(doc)
+
+        return {
+            "documents": documents,
+            "errors": errors,
+        }
+
     @app.delete("/api/documents/{document_id}")
     def delete_document(document_id: str, request: Request) -> dict:
         owner_id = request_owner(request, settings)

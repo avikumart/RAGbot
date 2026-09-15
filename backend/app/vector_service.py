@@ -144,6 +144,41 @@ class VectorService:
             )
             raise
 
+    def index_documents(self, document_ids: list[str]) -> dict[str, tuple[int, int]]:
+        if not document_ids:
+            return {}
+        results: dict[str, tuple[int, int]] = {}
+        if not self.enabled:
+            for doc_id in document_ids:
+                chunks = self.store.get_chunks([doc_id])
+                self.store.set_vector_status(
+                    doc_id, "disabled", self.settings.embedding_model
+                )
+                results[doc_id] = (0, len(chunks))
+            return results
+
+        for doc_id in document_ids:
+            self.store.set_vector_status(
+                doc_id, "indexing", self.settings.embedding_model
+            )
+
+        all_chunks = self.store.get_chunks(document_ids)
+        try:
+            self.index_chunks(all_chunks)
+            for doc_id in document_ids:
+                self.store.set_vector_status(
+                    doc_id, "ready", self.settings.embedding_model
+                )
+                doc_chunks = [c for c in all_chunks if c["document_id"] == doc_id]
+                results[doc_id] = (len(doc_chunks), 0)
+            return results
+        except Exception as exc:
+            for doc_id in document_ids:
+                self.store.set_vector_status(
+                    doc_id, "needs_reindex", self.settings.embedding_model, str(exc)[:500]
+                )
+            raise
+
     def search(
         self,
         question: str,

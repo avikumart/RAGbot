@@ -2,8 +2,10 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { DocumentLibrary } from "@/components/document-library";
+import type { QueueItem } from "@/components/upload-queue";
 import { api, streamChat } from "@/lib/api";
 import type {
+  BatchUploadResponse,
   ChatMessage,
   ChatRequest,
   ChatSession,
@@ -121,6 +123,7 @@ export default function Home() {
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadQueue, setUploadQueue] = useState<QueueItem[]>([]);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -267,39 +270,169 @@ export default function Home() {
     messageEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [messages, thinking]);
 
-  async function uploadDocument(file: File) {
+  async function uploadDocuments(filesInput: File | File[]) {
+    const rawFiles = Array.isArray(filesInput) ? filesInput : [filesInput];
+    if (!rawFiles.length) return;
+
     const allowed = [".pdf", ".docx", ".txt", ".md"];
-    if (!allowed.some((extension) => file.name.toLowerCase().endsWith(extension))) {
+    const MAX_FILES = 50;
+    let files = rawFiles;
+    if (files.length > MAX_FILES) {
+      setNotice(`Maximum ${MAX_FILES} files can be uploaded at once. Processing the first ${MAX_FILES} files.`);
+      files = files.slice(0, MAX_FILES);
+    }
+
+    const newQueueItems: QueueItem[] = files.map((file) => {
+      const isAllowed = allowed.some((ext) => file.name.toLowerCase().endsWith(ext));
+      return {
+        id: crypto.randomUUID(),
+        file,
+        name: file.name,
+        size: file.size,
+        status: isAllowed ? "queued" : "error",
+        error: isAllowed ? null : "Choose a PDF, DOCX, TXT, or Markdown file.",
+      };
+    });
+
+    setUploadQueue((current) => [...newQueueItems, ...current]);
+    setNotice(null);
+
+    const validFiles = newQueueItems.filter((item) => item.status === "queued");
+    if (!validFiles.length) {
       setNotice("Choose a PDF, DOCX, TXT, or Markdown file.");
       return;
     }
+
     setUploading(true);
-    setNotice(null);
-    const form = new FormData();
-    form.append("file", file);
-    try {
-      const uploaded = await api<DocumentRecord>("/api/documents", { method: "POST", body: form });
-      const nextDocuments = await refreshLibrary();
-      setSelectedDocument(uploaded.id);
-      setSelectedPerson(null);
-      setConnected(true);
-      const indexed = nextDocuments.find((document) => document.id === uploaded.id) ?? uploaded;
-      const indexPresentation = documentIndexStatus(indexed.index_status);
-      setNotice(
-        indexPresentation.tone === "ready"
-          ? `${uploaded.filename} is uploaded and ready.`
-          : indexPresentation.tone === "lexical"
-            ? `${uploaded.filename} is uploaded in lexical-only mode. You can chat with it now.`
-            : indexPresentation.tone === "repair"
-              ? `${uploaded.filename} is uploaded in lexical-only mode, but its semantic index needs repair. You can still chat with it now.`
-              : `${uploaded.filename} is uploaded and indexing.`,
+
+    if (validFiles.length === 1 && files.length === 1) {
+      const item = validFiles[0];
+      setUploadQueue((current) =>
+        current.map((q) => (q.id === item.id ? { ...q, status: "uploading" } : q))
       );
+      const form = new FormData();
+      form.append("file", item.file);
+      try {
+        const uploaded = await api<DocumentRecord>("/api/documents", { method: "POST", body: form });
+        const nextDocuments = await refreshLibrary();
+        setSelectedDocument(uploaded.id);
+        setSelectedPerson(null);
+        setConnected(true);
+        setUploadQueue((current) =>
+          current.map((q) =>
+            q.id === item.id ? { ...q, status: "ready", documentId: uploaded.id } : q
+          )
+        );
+        const indexed = nextDocuments.find((doc) => doc.id === uploaded.id) ?? uploaded;
+        const indexPresentation = documentIndexStatus(indexed.index_status);
+        setNotice(
+          indexPresentation.tone === "ready"
+            ? `${uploaded.filename} is uploaded and ready.`
+            : indexPresentation.tone === "lexical"
+              ? `${uploaded.filename} is uploaded in lexical-only mode. You can chat with it now.`
+              : indexPresentation.tone === "repair"
+                ? `${uploaded.filename} is uploaded in lexical-only mode, but its semantic index needs repair. You can still chat with it now.`
+                : `${uploaded.filename} is uploaded and indexing.`
+        );
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "The document could not be uploaded.";
+        setNotice(msg);
+        setUploadQueue((current) =>
+          current.map((q) => (q.id === item.id ? { ...q, status: "error", error: msg } : q))
+        );
+      } finally {
+        setUploading(false);
+        if (fileInput.current) fileInput.current.value = "";
+      }
+      return;
+    }
+
+    const validIds = new Set(validFiles.map((v) => v.id));
+    setUploadQueue((current) =>
+      current.map((q) => (validIds.has(q.id) ? { ...q, status: "uploading" } : q))
+    );
+
+    const form = new FormData();
+    for (const item of validFiles) {
+      form.append("files", item.file);
+    }
+
+    try {
+      const result = await api<BatchUploadResponse>("/api/documents/batch", {
+        method: "POST",
+        body: form,
+      });
+
+      await refreshLibrary();
+      setConnected(true);
+
+      const returnedDocMap = new Map(result.documents.map((d) => [d.filename, d]));
+      const errorMap = new Map(result.errors.map((e) => [e.filename, e.detail]));
+
+      setUploadQueue((current) =>
+        current.map((q) => {
+          if (!validIds.has(q.id)) return q;
+          const doc = returnedDocMap.get(q.name);
+          if (doc) {
+            return { ...q, status: "ready", documentId: doc.id };
+          }
+          const errDetail = errorMap.get(q.name);
+          if (errDetail) {
+            return { ...q, status: "error", error: errDetail };
+          }
+          return { ...q, status: "ready" };
+        })
+      );
+
+      if (result.documents.length > 0) {
+        setSelectedDocument(result.documents[result.documents.length - 1].id);
+        setSelectedPerson(null);
+      }
+
+      if (result.errors.length > 0) {
+        setNotice(
+          `${result.documents.length} document${result.documents.length === 1 ? "" : "s"} uploaded, ${result.errors.length} failed.`
+        );
+      } else {
+        setNotice(`All ${result.documents.length} documents uploaded and indexed.`);
+      }
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "The document could not be uploaded.");
+      const msg = error instanceof Error ? error.message : "Batch upload failed.";
+      setNotice(msg);
+      setUploadQueue((current) =>
+        current.map((q) => (validIds.has(q.id) ? { ...q, status: "error", error: msg } : q))
+      );
     } finally {
       setUploading(false);
       if (fileInput.current) fileInput.current.value = "";
     }
+  }
+
+  async function retryQueueItem(item: QueueItem) {
+    setUploadQueue((current) =>
+      current.map((q) => (q.id === item.id ? { ...q, status: "uploading", error: null } : q))
+    );
+    const form = new FormData();
+    form.append("file", item.file);
+    try {
+      const uploaded = await api<DocumentRecord>("/api/documents", { method: "POST", body: form });
+      await refreshLibrary();
+      setConnected(true);
+      setUploadQueue((current) =>
+        current.map((q) => (q.id === item.id ? { ...q, status: "ready", documentId: uploaded.id } : q))
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : "Retry failed.";
+      setUploadQueue((current) =>
+        current.map((q) => (q.id === item.id ? { ...q, status: "error", error: msg } : q))
+      );
+    }
+  }
+
+  function clearQueue() {
+    setUploadQueue((current) =>
+      current.filter((item) => item.status === "uploading" || item.status === "queued")
+    );
   }
 
   async function submitMessage(message: string, clientMessageId = crypto.randomUUID()) {
@@ -513,7 +646,7 @@ export default function Home() {
         uploading={uploading}
         checkingStatus={checkingStatus}
         fileInput={fileInput}
-        onUpload={(file) => void uploadDocument(file)}
+        onUpload={(files) => void uploadDocuments(files)}
         onCheckStatus={() => void checkDocumentStatus()}
         onSelectDocument={selectDocument}
         onRemoveDocument={(document) => void removeDocument(document)}
@@ -521,6 +654,9 @@ export default function Home() {
         activeSessionId={activeSessionId}
         onNewConversation={newConversation}
         onSelectSession={(sessionId) => void selectSession(sessionId)}
+        uploadQueue={uploadQueue}
+        onRetryQueueItem={(item) => void retryQueueItem(item)}
+        onClearQueue={clearQueue}
       />
 
       <section className="chat-panel">
