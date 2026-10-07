@@ -1,9 +1,8 @@
 export const API_ERROR_MESSAGE = "Something went wrong. Please try again.";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-// Session and chat traffic must stay same-origin so the server-side proxy can
-// derive and sign the authenticated owner. Document-library traffic remains on
-// the configured FastAPI URL for the existing local deployment shape.
+// Session, chat, document, and health check traffic stay same-origin so the
+// server-side proxy handles identity signing and container network isolation.
 const AUTHENTICATED_API_URL = "";
 
 export type DocumentRecord = {
@@ -152,6 +151,7 @@ export async function parseApiError(response: Response): Promise<string> {
 
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const authenticated =
+    path === "/api/health" ||
     path === "/api/chat" ||
     path.startsWith("/api/sessions") ||
     path.startsWith("/api/documents") ||

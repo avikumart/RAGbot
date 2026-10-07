@@ -4,7 +4,7 @@ The backend is a FastAPI application in `backend/app/`. It ingests documents, pe
 
 ## Run and test
 
-Docker Compose is the normal local runtime and exposes the API at `http://localhost:8000`; interactive OpenAPI documentation is available at `/docs`.
+Docker Compose is the normal local runtime. In standard Docker Compose deployments, only the frontend is published to the host at `http://localhost:3000`; the backend container (`api`) is isolated to the internal Docker network on port 8000, routing all external traffic and health checks through the authenticated frontend proxy (`web`). (Port 8000 can be mapped to the host if standalone backend development or direct access to OpenAPI documentation at `/docs` is required.)
 
 ```bash
 docker compose up --build

@@ -33,8 +33,8 @@ services:
       EMBEDDING_TIMEOUT_SECONDS: ${EMBEDDING_TIMEOUT_SECONDS:-30}
       AUTH_PROXY_SECRET: ${AUTH_PROXY_SECRET:-}
       LOCAL_DEVELOPMENT_OWNER: ${LOCAL_DEVELOPMENT_OWNER:-local-development-user}
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     volumes:
       - personagraph_data:/data
       - embedding_cache:/models
