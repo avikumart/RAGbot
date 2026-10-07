@@ -174,3 +174,6 @@ flowchart LR
     style ProxyZone fill:#f0f7ff,stroke:#0275d8
     style PrivateZone fill:#f0fff0,stroke:#5cb85c
 ```
+
+> [!NOTE]
+> In standard Docker Compose deployments, only port 3000 (`web`) is published to the host network interface. The backend application container (`api`), database (`postgres`), and vector engine (`qdrant`) remain unexposed to the host and communicate exclusively across the internal Docker bridge network (`api:8000`). All client-initiated traffic, including health status checks (`GET /api/health`), routes through the authenticated Next.js proxy (`web`).
