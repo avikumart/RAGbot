@@ -365,3 +365,97 @@ def get_person_aliases(person_name: str, known_people: list[dict[str, Any]]) -> 
             all_known = [person["name"], *person.get("aliases", [])]
             return list(dict.fromkeys(all_known))
     return [person_name]
+
+
+def resolve_query_entities(
+    query: str,
+    known_entities: Iterable[str] | None = None,
+    known_people: list[dict[str, Any]] | None = None,
+) -> list[str]:
+    """Identify and resolve target entities from a user query using entity resolution and aliases.
+
+    Matches query mentions against known graph entities, known people (including aliases,
+    honorifics, first names, and nicknames), and extracts multi-word named entities.
+    """
+    if not query or not query.strip():
+        return []
+
+    identified: list[str] = []
+    seen_lower: set[str] = set()
+
+    def add_entity(entity: str) -> None:
+        ent = entity.strip(" .,:;()[]{}'\"“”")
+        if not ent or ent.lower() in seen_lower:
+            return
+        seen_lower.add(ent.lower())
+        identified.append(ent)
+
+    people_list = list(known_people or [])
+    query_tokens = [t.strip(".,;:?!'\"()[]").casefold() for t in query.split() if t.strip()]
+
+    # 1. Direct and alias matching against known_people using get_person_aliases & nicknames
+    for person in people_list:
+        p_name = person["name"]
+        p_aliases = get_person_aliases(p_name, people_list)
+        all_variations = [p_name, *p_aliases]
+
+        matched = False
+        for var in all_variations:
+            if re.search(rf"\b{re.escape(var)}\b", query, flags=re.IGNORECASE):
+                add_entity(p_name)
+                matched = True
+                break
+
+        if matched:
+            continue
+
+        prefix, core, suffix = parse_name_parts(p_name)
+        if core:
+            first_name = core[0].casefold()
+            if any(tok == first_name for tok in query_tokens):
+                add_entity(p_name)
+                continue
+            for tok in query_tokens:
+                if are_nicknames(tok, first_name):
+                    add_entity(p_name)
+                    break
+
+    # 2. Match against known_entities (from graph: source_entity & target_entity)
+    entities_list = [e for e in (known_entities or []) if e and e.strip()]
+    sorted_entities = sorted(entities_list, key=len, reverse=True)
+
+    for ent in sorted_entities:
+        ent_clean = ent.strip()
+        if not ent_clean:
+            continue
+        if re.search(rf"\b{re.escape(ent_clean)}\b", query, flags=re.IGNORECASE):
+            add_entity(ent_clean)
+        else:
+            _, core, _ = parse_name_parts(ent_clean)
+            if len(core) >= 2:
+                clean_core = " ".join(core)
+                if re.search(rf"\b{re.escape(clean_core)}\b", query, flags=re.IGNORECASE):
+                    add_entity(ent_clean)
+
+    # 3. Quoted phrases and capitalized entity phrases
+    for match in re.finditer(r'["\']([^"\']{2,60})["\']', query):
+        phrase = match.group(1).strip()
+        if phrase:
+            add_entity(phrase)
+
+    cap_pattern = re.compile(
+        r"\b([A-Z][a-zA-Z0-9'-]+(?:\s+[A-Z][a-zA-Z0-9'-]+){0,3})\b"
+    )
+    for match in cap_pattern.finditer(query):
+        cand = match.group(1).strip()
+        if len(cand) < 2:
+            continue
+        if cand.casefold() in {"who", "what", "where", "when", "why", "how", "the", "did", "does", "which"}:
+            continue
+        matched_known = next((e for e in entities_list if e.casefold() == cand.casefold()), None)
+        if matched_known:
+            add_entity(matched_known)
+        elif not known_entities:
+            add_entity(cand)
+
+    return identified
