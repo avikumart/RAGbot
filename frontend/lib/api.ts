@@ -288,4 +288,28 @@ export async function fetchGraph(documentId?: string, person?: string): Promise<
   return response.json();
 }
 
+export function getDocumentFileUrl(documentId: string): string {
+  return `/api/documents/${documentId}/file`;
+}
+
+export type DocumentChunk = {
+  id: number;
+  ordinal: number;
+  page: number | null;
+  content: string;
+  people: string[];
+};
+
+export type DocumentDetails = DocumentRecord & {
+  chunks: DocumentChunk[];
+};
+
+export async function fetchDocumentDetails(documentId: string): Promise<DocumentDetails> {
+  const response = await fetch(`/api/documents/${documentId}`);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response, "Failed to load document details"));
+  }
+  return response.json();
+}
+
 

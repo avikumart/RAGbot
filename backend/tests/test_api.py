@@ -945,5 +945,95 @@ def test_batch_upload_exceeds_max_files_limit(tmp_path):
         assert "50 files" in response.json()["detail"]
 
 
+def test_stream_document_file_full_and_range_requests(tmp_path):
+    client, document = client_with_sample(tmp_path)
+    try:
+        doc_id = document["id"]
+
+        # 1. Full document streaming (200 OK)
+        resp = client.get(f"/api/documents/{doc_id}/file")
+        assert resp.status_code == 200
+        assert resp.headers.get("accept-ranges") == "bytes"
+        assert resp.headers.get("content-length") == str(len(SAMPLE))
+        assert "text/plain" in resp.headers.get("content-type", "")
+        assert resp.content == SAMPLE
+
+        # 2. Byte range request (206 Partial Content) - bytes=0-9
+        range_resp = client.get(
+            f"/api/documents/{doc_id}/file",
+            headers={"Range": "bytes=0-9"},
+        )
+        assert range_resp.status_code == 206
+        assert range_resp.headers.get("content-range") == f"bytes 0-9/{len(SAMPLE)}"
+        assert range_resp.headers.get("content-length") == "10"
+        assert range_resp.content == SAMPLE[0:10]
+
+        # 3. Suffix byte range request (206 Partial Content) - bytes=-10 (last 10 bytes)
+        suffix_resp = client.get(
+            f"/api/documents/{doc_id}/file",
+            headers={"Range": "bytes=-10"},
+        )
+        assert suffix_resp.status_code == 206
+        expected_start = len(SAMPLE) - 10
+        assert suffix_resp.headers.get("content-range") == f"bytes {expected_start}-{len(SAMPLE) - 1}/{len(SAMPLE)}"
+        assert suffix_resp.content == SAMPLE[-10:]
+
+        # 4. Unsatisfiable byte range request (416 Range Not Satisfiable)
+        unsat_resp = client.get(
+            f"/api/documents/{doc_id}/file",
+            headers={"Range": f"bytes={len(SAMPLE) + 100}-{len(SAMPLE) + 200}"},
+        )
+        assert unsat_resp.status_code == 416
+        assert unsat_resp.headers.get("content-range") == f"bytes */{len(SAMPLE)}"
+
+        # 5. Nonexistent document returns 404
+        notFound_resp = client.get("/api/documents/nonexistent-id/file")
+        assert notFound_resp.status_code == 404
+
+        # 6. Document details endpoint
+        details_resp = client.get(f"/api/documents/{doc_id}")
+        assert details_resp.status_code == 200
+        details = details_resp.json()
+        assert details["id"] == doc_id
+        assert "chunks" in details
+        assert len(details["chunks"]) >= 1
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_stream_document_file_owner_authorization(tmp_path, monkeypatch):
+    secret = "secret-file-auth"
+    monkeypatch.setenv("AUTH_PROXY_SECRET", secret)
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    client.__enter__()
+    try:
+        alice_headers = owner_headers("alice", secret)
+        bob_headers = owner_headers("bob", secret)
+
+        upload_resp = client.post(
+            "/api/documents",
+            files={"file": ("secret.txt", b"Secret data for Alice", "text/plain")},
+            headers=alice_headers,
+        )
+        assert upload_resp.status_code == 201
+        doc_id = upload_resp.json()["id"]
+
+        # Alice can fetch the file
+        alice_file = client.get(f"/api/documents/{doc_id}/file", headers=alice_headers)
+        assert alice_file.status_code == 200
+        assert alice_file.content == b"Secret data for Alice"
+
+        # Bob cannot fetch Alice's file (404 Document not found)
+        bob_file = client.get(f"/api/documents/{doc_id}/file", headers=bob_headers)
+        assert bob_file.status_code == 404
+
+        # Unauthenticated request without signature fails with 401
+        unauth = client.get(f"/api/documents/{doc_id}/file")
+        assert unauth.status_code == 401
+    finally:
+        client.__exit__(None, None, None)
+
+
 
 

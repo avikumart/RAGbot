@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { DocumentLibrary } from "@/components/document-library";
 import { PersonaGraph } from "@/components/persona-graph";
+import { PDFViewer } from "@/components/pdf-viewer";
 import type { QueueItem } from "@/components/upload-queue";
 import { api, fetchGraph, streamChat } from "@/lib/api";
 import type {
@@ -96,16 +97,41 @@ function answerModeLabel(mode: string) {
   return mode;
 }
 
-function AnswerText({ text }: { text: string }) {
+function AnswerText({
+  text,
+  sources,
+  onCitationClick,
+}: {
+  text: string;
+  sources?: Source[];
+  onCitationClick?: (source: Source) => void;
+}) {
   const parts = text.split(/(\[\d+\])/g);
   return (
     <p className="answer-text">
       {parts.map((part, index) => {
         const match = part.match(/^\[(\d+)\]$/);
-        return match ? (
-          <span className="inline-citation" key={`${part}-${index}`}>{match[1]}</span>
-        ) : (
-          <span key={`${part}-${index}`}>{part}</span>
+        if (!match) {
+          return <span key={`${part}-${index}`}>{part}</span>;
+        }
+        const citationNum = Number(match[1]);
+        const source = sources?.find((s) => s.index === citationNum);
+        return (
+          <button
+            type="button"
+            className="inline-citation"
+            key={`${part}-${index}`}
+            aria-label={`View citation [${citationNum}]`}
+            title={source ? `${source.filename}${source.page ? ` · p. ${source.page}` : ""}` : `Citation [${citationNum}]`}
+            data-testid={`citation-badge-${citationNum}`}
+            onClick={() => {
+              if (source && onCitationClick) {
+                onCitationClick(source);
+              }
+            }}
+          >
+            {match[1]}
+          </button>
         );
       })}
     </p>
@@ -134,6 +160,7 @@ export default function Home() {
   const [activeSideTab, setActiveSideTab] = useState<"people" | "graph">("people");
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
+  const [activeCitation, setActiveCitation] = useState<Source | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -784,17 +811,35 @@ export default function Home() {
                   <div className="avatar" aria-hidden="true">{message.role === "assistant" ? "P" : "You"}</div>
                   <div className="message-body">
                     <span className="message-author">{message.role === "assistant" ? "Personagraph" : "You"}</span>
-                    {message.role === "assistant" ? <AnswerText text={message.content} /> : <p>{message.content}</p>}
+                    {message.role === "assistant" ? (
+                      <AnswerText
+                        text={message.content}
+                        sources={message.sources}
+                        onCitationClick={(src) => setActiveCitation(src)}
+                      />
+                    ) : (
+                      <p>{message.content}</p>
+                    )}
                     {!!message.sources?.length && (
                       <div className="source-list">
                         {message.sources.map((source) => (
-                          <details className="source-card" key={`${message.id}-${source.index}`}>
+                          <details className="source-card" key={`${message.id}-${source.index}`} data-testid={`source-card-${source.index}`}>
                             <summary>
                               <span className="source-number">{source.index}</span>
                               <span>{citationLabel(source)}</span>
                               <small>{Math.round(source.score * 100)}% match</small>
                             </summary>
                             <p>{source.excerpt}</p>
+                            <div className="source-card-actions">
+                              <button
+                                type="button"
+                                className="source-card-view-btn"
+                                onClick={() => setActiveCitation(source)}
+                                data-testid={`view-source-btn-${source.index}`}
+                              >
+                                <span>View in document</span> ↗
+                              </button>
+                            </div>
                           </details>
                         ))}
                       </div>
@@ -959,6 +1004,11 @@ export default function Home() {
           </div>
         </details>
       </aside>
+      <PDFViewer
+        key={activeCitation ? `${activeCitation.document_id}-${activeCitation.index}` : "empty"}
+        source={activeCitation}
+        onClose={() => setActiveCitation(null)}
+      />
     </main>
   );
 }

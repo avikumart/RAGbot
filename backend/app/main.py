@@ -125,6 +125,74 @@ def decode_cursor(value: str | None) -> tuple[str, str] | None:
     return timestamp, session_id
 
 
+def parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | None:
+    """Parse HTTP Range header: 'bytes=start-end'.
+
+    Returns (start, end) inclusive, or None if invalid or unsatisfiable.
+    """
+    if not range_header or not range_header.startswith("bytes="):
+        return None
+    raw_range = range_header[len("bytes=") :].strip()
+    if "," in raw_range:
+        raw_range = raw_range.split(",")[0].strip()
+    parts = raw_range.split("-")
+    if len(parts) != 2:
+        return None
+    start_str, end_str = parts[0].strip(), parts[1].strip()
+    try:
+        if start_str and end_str:
+            start = int(start_str)
+            end = int(end_str)
+        elif start_str:
+            start = int(start_str)
+            end = file_size - 1
+        elif end_str:
+            suffix_len = int(end_str)
+            if suffix_len <= 0:
+                return None
+            start = max(0, file_size - suffix_len)
+            end = file_size - 1
+        else:
+            return None
+    except ValueError:
+        return None
+
+    if start < 0 or start >= file_size or end < start:
+        return None
+    return start, min(end, file_size - 1)
+
+
+def resolve_mime_type(filename: str, stored_content_type: str | None = None) -> str:
+    suffix = Path(filename).suffix.lower()
+    type_map = {
+        ".pdf": "application/pdf",
+        ".txt": "text/plain; charset=utf-8",
+        ".md": "text/markdown; charset=utf-8",
+        ".csv": "text/csv; charset=utf-8",
+        ".html": "text/html; charset=utf-8",
+        ".htm": "text/html; charset=utf-8",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }
+    if suffix in type_map:
+        return type_map[suffix]
+    if stored_content_type and stored_content_type != "application/octet-stream":
+        return stored_content_type
+    return "application/octet-stream"
+
+
+def file_range_iterator(file_path: Path, start: int, length: int, chunk_size: int = 65536):
+    with open(file_path, "rb") as f:
+        f.seek(start)
+        bytes_left = length
+        while bytes_left > 0:
+            chunk = f.read(min(chunk_size, bytes_left))
+            if not chunk:
+                break
+            bytes_left -= len(chunk)
+            yield chunk
+
+
 def create_app(
     data_dir: Path | None = None,
     vector_service: VectorService | None = None,
@@ -453,6 +521,82 @@ def create_app(
                 exc,
             )
         return {"deleted": True}
+
+    @app.get("/api/documents/{document_id}")
+    def get_document_details(document_id: str, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
+        doc = store.get_document(document_id, owner_id=owner_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        chunks = store.get_chunks([document_id], owner_id=owner_id)
+        return {
+            **doc,
+            "chunks": [
+                {
+                    "id": chunk["id"],
+                    "ordinal": chunk["ordinal"],
+                    "page": chunk["page"],
+                    "content": chunk["content"],
+                    "people": chunk.get("people", []),
+                }
+                for chunk in chunks
+            ],
+        }
+
+    @app.get("/api/documents/{document_id}/file")
+    def stream_document_file(document_id: str, request: Request) -> Response:
+        owner_id = request_owner(request, settings)
+        file_info = store.get_document_file_info(document_id, owner_id=owner_id)
+        if not file_info:
+            raise HTTPException(status_code=404, detail="Document not found.")
+
+        file_path = Path(file_info["stored_path"])
+        if not file_path.is_file():
+            raise HTTPException(status_code=404, detail="Document file not found.")
+
+        file_size = file_path.stat().st_size
+        mime_type = resolve_mime_type(file_info["filename"], file_info["content_type"])
+        filename = file_info["filename"]
+        safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
+        content_disposition = f'inline; filename="{safe_filename}"'
+
+        range_header = request.headers.get("range")
+        if range_header:
+            parsed_range = parse_range_header(range_header, file_size)
+            if parsed_range is None:
+                return Response(
+                    status_code=416,
+                    headers={
+                        "Content-Range": f"bytes */{file_size}",
+                        "Accept-Ranges": "bytes",
+                    },
+                )
+            start, end = parsed_range
+            content_length = end - start + 1
+            headers = {
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(content_length),
+                "Content-Type": mime_type,
+                "Content-Disposition": content_disposition,
+            }
+            return StreamingResponse(
+                file_range_iterator(file_path, start, content_length),
+                status_code=206,
+                headers=headers,
+            )
+
+        headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+            "Content-Type": mime_type,
+            "Content-Disposition": content_disposition,
+        }
+        return StreamingResponse(
+            file_range_iterator(file_path, 0, file_size),
+            status_code=200,
+            headers=headers,
+        )
 
     @app.post("/api/sessions", status_code=201)
     def create_session(payload: CreateSessionRequest, request: Request) -> dict:

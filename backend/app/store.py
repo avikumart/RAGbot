@@ -244,6 +244,28 @@ class Store:
             None,
         )
 
+    def get_document_file_info(self, document_id: str, owner_id: str | None = None) -> dict | None:
+        clause = "WHERE id = ?"
+        params: list[Any] = [document_id]
+        if owner_id is not None:
+            clause += " AND owner_id = ?"
+            params.append(owner_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                f"SELECT id, filename, content_type, stored_path, size_bytes, owner_id FROM documents {clause}",
+                params,
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "id": row["id"],
+                "filename": row["filename"],
+                "content_type": row["content_type"],
+                "stored_path": row["stored_path"],
+                "size_bytes": row["size_bytes"],
+                "owner_id": row["owner_id"],
+            }
+
     @staticmethod
     def _chat_session_dict(row) -> dict:
         return {
