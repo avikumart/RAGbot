@@ -94,3 +94,44 @@ Top-$K$ fused chunks are normalized to a relative confidence score ($0.0 \dots 1
 1. **Authoritative Excerpt Guarantee**: Even when retrieved via Qdrant, excerpt text, filenames, and page numbers are **always loaded from SQLite** by `chunk_id`. This prevents stale vector payloads from reaching answers.
 2. **Cerebras LLM Mode**: When `CEREBRAS_API_KEY` is set, formatted sources `[1]`, `[2]` are passed to the model with strict developer instructions requiring citation markers for all factual assertions.
 3. **Local Grounded Synthesis**: When running without an API key, the system extracts the highest-scoring sentences directly referencing the query terms and entities, generating grounded answers deterministically with corresponding citation references.
+
+---
+
+## 5. GraphRAG Multi-Hop Expansion & Relational Retrieval
+
+Complex relational reasoning across documents (e.g. *"Who worked with Jordan on Project Apollo through Maya?"* or *"What companies connect Alice and Bob?"*) requires connecting entities across independent chunks and documents.
+
+```mermaid
+flowchart TD
+    Prompt["User Prompt"] --> EntityRec["Query Entity Recognition\n(entity_resolution.py)"]
+    EntityRec --> SubgraphTrav["2-Hop Subgraph Traversal\n(SQLite entity_relationships, < 15ms)"]
+    SubgraphTrav --> BridgeID["Identify Bridging Nodes\n& Connecting Edges"]
+    BridgeID --> RelBoost["Relational Chunk Boosting\n(+0.04 for Bridging Nodes)"]
+    BridgeID --> GraphInject["Graph Context Formatter\n([Entity A] --(rel)--> [Entity B])"]
+    RelBoost --> HybridCandidates["Hybrid Candidate Ranking\n(BM25 + Dense Vectors)"]
+    HybridCandidates & GraphInject --> PromptContext["LLM Generation Context\n(Entity Relationships + Excerpts)"]
+```
+
+### 1. Query Entity Recognition
+Extracts query targets using `resolve_query_entities`:
+- Resolves full names, canonical aliases, honorifics, and nicknames via `entity_resolution.py`.
+- Discovers multi-word named entities and projects matching the scoped document graph.
+
+### 2. 2-Hop Subgraph Traversal
+Performs sub-15ms multi-hop neighborhood expansion over SQLite's indexed `entity_relationships` (`source_entity`, `target_entity`, `document_id`):
+- Explores 1-hop and 2-hop neighbor nodes within tenant-scoped documents.
+- Discovers intermediate bridging nodes connecting disjoint entities.
+
+### 3. Relational Chunk Boosting
+Boosts candidate chunks containing discovered bridging nodes (`+0.04`), ensuring multi-hop connecting excerpts across different documents enter the top-$K$ candidate set even when direct lexical overlap with the query prompt is distributed.
+
+### 4. Graph Context Injection
+Formats the extracted relational subgraph as structured statements:
+```
+[Entity A] --(relation)--> [Entity B]
+```
+Injected into the prompt header (`Entity Relationships:`) directly preceding document excerpts, giving the LLM explicit relational pathways for factual multi-hop deduction.
+
+### 5. Configuration
+- `GRAPHRAG_ENABLED`: Boolean toggle (default: `true`).
+- `GRAPHRAG_DEPTH`: Maximum traversal hop depth (default: `2`).

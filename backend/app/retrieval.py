@@ -6,10 +6,54 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 
-from .entity_resolution import get_person_aliases
+from .entity_resolution import get_person_aliases, resolve_query_entities
 from .reranker import RerankerService
 from .store import Store
 from .vector_service import VectorService
+
+
+def format_graph_context(edges: list[dict]) -> str:
+    """Format the extracted relationship subgraph into structured context:
+    [Entity A] --(relation)--> [Entity B]
+    """
+    if not edges:
+        return ""
+    lines = []
+    seen = set()
+    for edge in edges:
+        s = edge["source_entity"]
+        r = edge["relation"]
+        t = edge["target_entity"]
+        line = f"[{s}] --({r})--> [{t}]"
+        if line not in seen:
+            seen.add(line)
+            lines.append(line)
+    return "\n".join(lines)
+
+
+class RetrievalResult(tuple):
+    """3-tuple of (people, sources, retrieval_mode) with accessible .graph_context attribute."""
+
+    def __new__(
+        cls,
+        people: list[str],
+        sources: list[dict],
+        retrieval_mode: str,
+        graph_context: str = "",
+    ):
+        return super().__new__(cls, (people, sources, retrieval_mode))
+
+    def __init__(
+        self,
+        people: list[str],
+        sources: list[dict],
+        retrieval_mode: str,
+        graph_context: str = "",
+    ):
+        self.people = people
+        self.sources = sources
+        self.retrieval_mode = retrieval_mode
+        self.graph_context = graph_context
 
 
 STOP_WORDS = {
@@ -250,14 +294,45 @@ def hybrid_retrieve(
     reranker: RerankerService | None = None,
     history: list[dict] | None = None,
     owner_id: str | None = None,
-) -> tuple[list[str], list[dict], str]:
+    graphrag_enabled: bool = True,
+    graphrag_depth: int = 2,
+    return_graph_context: bool = False,
+) -> tuple[list[str], list[dict], str] | tuple[list[str], list[dict], str, str]:
     chunks = store.get_chunks(document_ids, owner_id=owner_id)
     known_people = store.list_people(document_ids, owner_id=owner_id)
     standalone_query, people = reformulate_query(
         question, history=history, known_people=known_people, explicit_person=explicit_person
     )
     if not chunks:
-        return people, [], "lexical"
+        res = RetrievalResult(people, [], "lexical", graph_context="")
+        return (people, [], "lexical", "") if return_graph_context else res
+
+    # GraphRAG multi-hop neighborhood expansion & bridging node extraction
+    graph_context = ""
+    bridging_nodes: list[str] = []
+    bridging_chunk_ids: set[int] = set()
+    target_entities: list[str] = []
+
+    if graphrag_enabled and store is not None:
+        try:
+            scoped_entities = store.get_scoped_entities(document_ids, owner_id=owner_id)
+            target_entities = resolve_query_entities(
+                standalone_query, known_entities=scoped_entities, known_people=known_people
+            )
+            seeds = target_entities or people
+            if seeds:
+                subgraph = store.traverse_subgraph(
+                    seed_entities=seeds,
+                    document_ids=document_ids,
+                    owner_id=owner_id,
+                    max_depth=graphrag_depth,
+                )
+                edges = subgraph.get("edges", [])
+                bridging_nodes = subgraph.get("bridging_nodes", [])
+                bridging_chunk_ids = set(subgraph.get("bridging_chunk_ids", []))
+                graph_context = format_graph_context(edges)
+        except Exception as exc:
+            logger.warning("GraphRAG traversal failed: %s", exc)
 
     lexical = lexical_candidates(
         chunks,
@@ -298,13 +373,34 @@ def hybrid_retrieve(
 
     fused = reciprocal_rank_fusion(lexical, vector)
     chunk_by_id = {int(chunk["id"]): chunk for chunk in chunks}
-    for chunk_id in list(fused):
-        content = chunk_by_id.get(chunk_id, {}).get("content", "").casefold()
-        for person in people:
-            if person.casefold() in content:
-                fused[chunk_id] += 0.04
-            elif person.split()[0].casefold() in content:
-                fused[chunk_id] += 0.01
+
+    # Relational Chunk Boosting:
+    if bridging_nodes:
+        for cid in bridging_chunk_ids:
+            if cid in chunk_by_id and cid not in fused:
+                fused[cid] = 0.02
+
+        for chunk_id in list(fused):
+            content = chunk_by_id.get(chunk_id, {}).get("content", "").casefold()
+            for person in people:
+                if person.casefold() in content:
+                    fused[chunk_id] += 0.04
+                elif person.split()[0].casefold() in content:
+                    fused[chunk_id] += 0.01
+
+            for bridge in bridging_nodes:
+                if bridge.casefold() in content:
+                    fused[chunk_id] += 0.04
+                elif bridge.split()[0].casefold() in content:
+                    fused[chunk_id] += 0.01
+    else:
+        for chunk_id in list(fused):
+            content = chunk_by_id.get(chunk_id, {}).get("content", "").casefold()
+            for person in people:
+                if person.casefold() in content:
+                    fused[chunk_id] += 0.04
+                elif person.split()[0].casefold() in content:
+                    fused[chunk_id] += 0.01
 
     fused_candidates = sorted(
         ((score, chunk_by_id[chunk_id]) for chunk_id, score in fused.items() if chunk_id in chunk_by_id),
@@ -314,7 +410,8 @@ def hybrid_retrieve(
         fused_candidates = reranker.rerank(standalone_query, fused_candidates)
     chosen = fused_candidates[:top_k]
     if not chosen:
-        return people, [], retrieval_mode
+        res = RetrievalResult(people, [], retrieval_mode, graph_context=graph_context)
+        return (people, [], retrieval_mode, graph_context) if return_graph_context else res
     maximum = chosen[0][0]
     sources = [
         {
@@ -327,7 +424,10 @@ def hybrid_retrieve(
         }
         for index, (score, chunk) in enumerate(chosen, start=1)
     ]
-    return people, sources, retrieval_mode
+    res = RetrievalResult(people, sources, retrieval_mode, graph_context=graph_context)
+    if return_graph_context:
+        return people, sources, retrieval_mode, graph_context
+    return res
 
 
 def retrieve(
@@ -358,8 +458,13 @@ def _best_sentence(excerpt: str, query_terms: set[str], people: list[str]) -> st
     return max(sentences, key=rank)
 
 
-def synthesize_answer(question: str, people: list[str], sources: list[dict]) -> str:
-    if not sources:
+def synthesize_answer(
+    question: str,
+    people: list[str],
+    sources: list[dict],
+    graph_context: str | None = None,
+) -> str:
+    if not sources and not (graph_context and graph_context.strip()):
         person_phrase = f" about {', '.join(people)}" if people else ""
         return (
             f"I couldn’t find grounded evidence{person_phrase} in the selected documents. "
@@ -381,6 +486,15 @@ def synthesize_answer(question: str, people: list[str], sources: list[dict]) -> 
 
     subject = ", ".join(people) if people else "the people in your documents"
     if len(claims) == 1:
-        return f"Here’s what I found about {subject}:\n\n{claims[0]}"
-    bullets = "\n".join(f"- {claim}" for claim in claims)
-    return f"Here’s what I found about {subject}:\n\n{bullets}"
+        base_answer = f"Here’s what I found about {subject}:\n\n{claims[0]}"
+    elif len(claims) > 1:
+        bullets = "\n".join(f"- {claim}" for claim in claims)
+        base_answer = f"Here’s what I found about {subject}:\n\n{bullets}"
+    else:
+        base_answer = f"Here’s what I found about {subject}:"
+
+    if not claims and graph_context and graph_context.strip():
+        graph_bullets = "\n".join(f"- {line}" for line in graph_context.strip().splitlines()[:5])
+        return f"{base_answer}\n\n{graph_bullets}"
+
+    return base_answer

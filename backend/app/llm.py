@@ -23,14 +23,19 @@ Rules:
 """
 
 
-def format_source_context(sources: list[dict]) -> str:
+def format_source_context(sources: list[dict], graph_context: str | None = None) -> str:
     formatted_sources = []
     for source in sources:
         page_label = f", page {source['page']}" if source.get("page") else ""
         formatted_sources.append(
             f"[{source['index']}] {source['filename']}{page_label}\n{source['excerpt']}"
         )
-    return "\n\n".join(formatted_sources)
+    sources_text = "\n\n".join(formatted_sources)
+    if graph_context and graph_context.strip():
+        if sources_text:
+            return f"Entity Relationships:\n{graph_context.strip()}\n\nDocument Excerpts:\n{sources_text}"
+        return f"Entity Relationships:\n{graph_context.strip()}"
+    return sources_text
 
 
 def ensure_bracketed_citations(answer: str, sources: list[dict]) -> str:
@@ -114,12 +119,13 @@ class LLMProvider(ABC):
         sources: list[dict],
         history: list[dict] | None = None,
         client: httpx.AsyncClient | None = None,
+        graph_context: str | None = None,
     ) -> str | None:
         """Formats context, dispatches request, and guarantees source citations on success."""
         if not self.is_configured() or not sources:
             return None
 
-        context = format_source_context(sources)
+        context = format_source_context(sources, graph_context=graph_context)
         logger.info(
             "Requesting completion from %s with model %s and %d source(s).",
             self.provider_name,
@@ -167,12 +173,13 @@ class LLMProvider(ABC):
         sources: list[dict],
         history: list[dict] | None = None,
         client: httpx.AsyncClient | None = None,
+        graph_context: str | None = None,
     ) -> AsyncIterator[str]:
         """Streams text chunks from the provider."""
         if not self.is_configured() or not sources:
             return
 
-        context = format_source_context(sources)
+        context = format_source_context(sources, graph_context=graph_context)
         logger.info(
             "Streaming completion from %s with model %s and %d source(s).",
             self.provider_name,
@@ -735,6 +742,7 @@ class LLMService:
         sources: list[dict],
         history: list[dict] | None = None,
         client: httpx.AsyncClient | None = None,
+        graph_context: str | None = None,
     ) -> tuple[str | None, str]:
         """Generates answer using the configured provider.
 
@@ -745,7 +753,11 @@ class LLMService:
             return None, "local-grounded"
 
         answer = await self._provider.generate_response(
-            question=question, sources=sources, history=history, client=client
+            question=question,
+            sources=sources,
+            history=history,
+            client=client,
+            graph_context=graph_context,
         )
         if answer:
             return answer, self._provider.mode_label
@@ -758,6 +770,7 @@ class LLMService:
         sources: list[dict],
         history: list[dict] | None = None,
         client: httpx.AsyncClient | None = None,
+        graph_context: str | None = None,
     ) -> tuple[AsyncIterator[str] | None, str]:
         """Generates streaming tokens using the configured provider.
 
@@ -768,7 +781,11 @@ class LLMService:
 
         return (
             self._provider.stream_response(
-                question=question, sources=sources, history=history, client=client
+                question=question,
+                sources=sources,
+                history=history,
+                client=client,
+                graph_context=graph_context,
             ),
             self._provider.mode_label,
         )
@@ -783,11 +800,16 @@ async def generate_with_cerebras(
     sources: list[dict],
     history: list[dict] | None = None,
     client: httpx.AsyncClient | None = None,
+    graph_context: str | None = None,
 ) -> str | None:
     """Backward-compatible helper function for Cerebras generation."""
     provider = CerebrasProvider(api_key=api_key, base_url=base_url, model=model)
     return await provider.generate_response(
-        question=question, sources=sources, history=history, client=client
+        question=question,
+        sources=sources,
+        history=history,
+        client=client,
+        graph_context=graph_context,
     )
 
 
@@ -800,11 +822,16 @@ async def generate_with_cerebras_stream(
     sources: list[dict],
     history: list[dict] | None = None,
     client: httpx.AsyncClient | None = None,
+    graph_context: str | None = None,
 ) -> AsyncIterator[str]:
     """Backward-compatible helper function for streaming Cerebras generation."""
     provider = CerebrasProvider(api_key=api_key, base_url=base_url, model=model)
     async for token in provider.stream_response(
-        question=question, sources=sources, history=history, client=client
+        question=question,
+        sources=sources,
+        history=history,
+        client=client,
+        graph_context=graph_context,
     ):
         yield token
 

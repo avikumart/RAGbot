@@ -577,7 +577,7 @@ def create_app(
         else:
             scoped_doc_ids = list(owner_doc_ids)
 
-        identified_people, sources, retrieval_mode = hybrid_retrieve(
+        retrieval_res = hybrid_retrieve(
             store,
             payload.message,
             scoped_doc_ids,
@@ -589,7 +589,11 @@ def create_app(
             reranker=RerankerService(enabled=settings.reranker_enabled, model_name=settings.reranker_model),
             history=history,
             owner_id=owner_id,
+            graphrag_enabled=settings.graphrag_enabled,
+            graphrag_depth=settings.graphrag_depth,
         )
+        identified_people, sources, retrieval_mode = retrieval_res[0], retrieval_res[1], retrieval_res[2]
+        graph_context = getattr(retrieval_res, "graph_context", "")
 
         if is_streaming:
             stream_gen = None
@@ -598,6 +602,7 @@ def create_app(
                     question=payload.message,
                     sources=sources,
                     history=history,
+                    graph_context=graph_context,
                 )
             elif settings.llm_provider == "cerebras":
                 if settings.cerebras_api_key:
@@ -608,6 +613,7 @@ def create_app(
                         question=payload.message,
                         sources=sources,
                         history=history,
+                        graph_context=graph_context,
                     )
                     mode = f"cerebras:{settings.cerebras_model}"
                 else:
@@ -618,6 +624,7 @@ def create_app(
                     question=payload.message,
                     sources=sources,
                     history=history,
+                    graph_context=graph_context,
                 )
 
             async def event_stream() -> AsyncIterator[str]:
@@ -626,6 +633,7 @@ def create_app(
                     "people": identified_people,
                     "mode": mode,
                     "retrieval_mode": retrieval_mode,
+                    "graph_context": graph_context,
                 }
                 yield f"event: metadata\ndata: {json.dumps(meta)}\n\n"
 
@@ -643,7 +651,9 @@ def create_app(
                 persisted_mode = mode
                 if not full_answer:
                     persisted_mode = "local-grounded"
-                    full_answer = synthesize_answer(payload.message, identified_people, sources)
+                    full_answer = synthesize_answer(
+                        payload.message, identified_people, sources, graph_context=graph_context
+                    )
                     for chunk in re.split(r"(\s+)", full_answer):
                         if chunk:
                             yield f"event: token\ndata: {json.dumps({'delta': chunk})}\n\n"
@@ -677,6 +687,7 @@ def create_app(
                     "user_message": persisted["user_message"],
                     "assistant_message": assistant,
                     "answer": assistant["content"],
+                    "graph_context": graph_context,
                 }
                 yield f"event: complete\ndata: {json.dumps(complete_payload)}\n\n"
 
@@ -695,6 +706,7 @@ def create_app(
                 question=payload.message,
                 sources=sources,
                 history=history,
+                graph_context=graph_context,
             )
         elif settings.llm_provider == "cerebras":
             if settings.cerebras_api_key:
@@ -705,6 +717,7 @@ def create_app(
                     question=payload.message,
                     sources=sources,
                     history=history,
+                    graph_context=graph_context,
                 )
                 mode = f"cerebras:{settings.cerebras_model}" if generated else "local-grounded"
             else:
@@ -714,8 +727,11 @@ def create_app(
                 question=payload.message,
                 sources=sources,
                 history=history,
+                graph_context=graph_context,
             )
-        answer = generated or synthesize_answer(payload.message, identified_people, sources)
+        answer = generated or synthesize_answer(
+            payload.message, identified_people, sources, graph_context=graph_context
+        )
         persisted = store.persist_chat_turn(
             owner_id,
             session_id=payload.session_id,
@@ -740,6 +756,7 @@ def create_app(
             "topic": persisted["session"]["topic"],
             "user_message": persisted["user_message"],
             "assistant_message": assistant,
+            "graph_context": graph_context,
         }
 
     return app

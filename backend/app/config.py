@@ -37,6 +37,8 @@ class Settings:
     llm_base_url: str = ""
     llm_model: str = ""
     llm_timeout_seconds: float = 30.0
+    graphrag_enabled: bool = True
+    graphrag_depth: int = 2
 
     @classmethod
     def from_env(cls, data_dir: Path | None = None) -> "Settings":
@@ -156,4 +158,7 @@ class Settings:
             llm_base_url=llm_base_url,
             llm_model=llm_model,
             llm_timeout_seconds=llm_timeout_seconds,
+            graphrag_enabled=os.getenv("GRAPHRAG_ENABLED", "true").casefold()
+            in {"1", "true", "yes", "on"},
+            graphrag_depth=int(os.getenv("GRAPHRAG_DEPTH", "2")),
         )
