@@ -15,6 +15,7 @@ from .entity_resolution import cluster_people, get_person_aliases, parse_name_pa
 from .extraction import Chunk
 from .migrations import LATEST_SCHEMA_VERSION, MIGRATIONS
 from .relationship_extraction import extract_relationships_from_text
+from .temporal_extraction import extract_timeline_events, parse_date_sort_key
 
 
 DEFAULT_INDEX_STATUS = "pending"
@@ -163,6 +164,29 @@ class Store:
                     (document_id, chunk_id, source_entity, target_entity, relation, source_type, target_type)
                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     rels_to_insert,
+                )
+
+            # Extract and persist temporal entity events
+            events_to_insert = []
+            for row in inserted_chunks:
+                cid = row["id"]
+                content = row["content"]
+                extracted_events = extract_timeline_events(content, known_people=set(people.keys()))
+                for ev in extracted_events:
+                    events_to_insert.append((
+                        uuid4().hex,
+                        document_id,
+                        ev.entity_name,
+                        ev.event_text,
+                        ev.event_date,
+                        cid,
+                    ))
+            if events_to_insert:
+                connection.executemany(
+                    """INSERT INTO entity_events
+                    (id, document_id, entity_name, event_text, event_date, chunk_id)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
+                    events_to_insert,
                 )
         return {
             "id": document_id,
@@ -640,6 +664,7 @@ class Store:
             if self.database_component == "sqlite":
                 connection.execute("DELETE FROM chunks_fts WHERE document_id = ?", (document_id,))
             connection.execute("DELETE FROM entity_relationships WHERE document_id = ?", (document_id,))
+            connection.execute("DELETE FROM entity_events WHERE document_id = ?", (document_id,))
             connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
         try:
             # Retry every queued path while a deletion request has already paid
@@ -1095,4 +1120,80 @@ class Store:
             "bridging_nodes": sorted(bridging_nodes_set),
             "bridging_chunk_ids": sorted(bridging_chunk_ids),
         }
+
+    def get_person_timeline(
+        self,
+        person_name: str,
+        document_ids: Iterable[str] | None = None,
+        owner_id: str | None = None,
+    ) -> list[dict]:
+        """Return chronologically sorted milestone events for a person or organization."""
+        doc_scope = list(document_ids or [])
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if owner_id is not None:
+            clauses.append("documents.owner_id = ?")
+            params.append(owner_id)
+
+        if doc_scope:
+            clauses.append(f"entity_events.document_id IN ({','.join('?' for _ in doc_scope)})")
+            params.extend(doc_scope)
+
+        # Retrieve people in scope to expand aliases for canonical matching
+        all_people = self.list_people(document_ids=doc_scope or None, owner_id=owner_id)
+        aliases = get_person_aliases(person_name, all_people)
+        names_to_match = {person_name.casefold(), *[a.casefold() for a in aliases]}
+
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT entity_events.id,
+                           entity_events.document_id,
+                           entity_events.entity_name,
+                           entity_events.event_text,
+                           entity_events.event_date,
+                           entity_events.chunk_id,
+                           documents.filename,
+                           chunks.page,
+                           chunks.content AS chunk_content
+                    FROM entity_events
+                    JOIN documents ON documents.id = entity_events.document_id
+                    LEFT JOIN chunks ON chunks.id = entity_events.chunk_id
+                    {where_clause}""",
+                params,
+            ).fetchall()
+
+            events = []
+            for row in rows:
+                row_entity = row["entity_name"].casefold()
+                matches = (
+                    row_entity in names_to_match
+                    or any(name in row_entity for name in names_to_match)
+                    or any(row_entity in name for name in names_to_match)
+                )
+                if not matches:
+                    continue
+
+                events.append({
+                    "id": row["id"],
+                    "document_id": row["document_id"],
+                    "filename": row["filename"],
+                    "entity_name": row["entity_name"],
+                    "event_text": row["event_text"],
+                    "event_date": row["event_date"],
+                    "chunk_id": row["chunk_id"],
+                    "page": row["page"],
+                    "chunk_content": row["chunk_content"],
+                    "source_chunk": {
+                        "id": row["chunk_id"],
+                        "document_id": row["document_id"],
+                        "page": row["page"],
+                        "content": row["chunk_content"],
+                    } if row["chunk_id"] is not None else None,
+                })
+
+            # Sort chronologically by date
+            events.sort(key=lambda ev: parse_date_sort_key(ev["event_date"]))
+            return events
 

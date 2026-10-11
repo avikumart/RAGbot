@@ -263,6 +263,16 @@ def create_app(
         owner_id = request_owner(request, settings)
         return store.list_people(document_id, owner_id=owner_id)
 
+    @app.get("/api/people/{name}/timeline")
+    def person_timeline(
+        name: str,
+        request: Request,
+        document_id: str | None = None,
+    ) -> list[dict]:
+        owner_id = request_owner(request, settings)
+        doc_ids = [document_id] if document_id and document_id != "all" else None
+        return store.get_person_timeline(name, document_ids=doc_ids, owner_id=owner_id)
+
     @app.get("/api/graph")
     def graph(
         request: Request,

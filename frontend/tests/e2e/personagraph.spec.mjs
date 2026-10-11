@@ -206,6 +206,37 @@ async function installApi(page, state) {
       return;
     }
 
+    if (pathname.startsWith("/api/people/") && pathname.endsWith("/timeline")) {
+      const parts = pathname.split("/");
+      const personName = decodeURIComponent(parts[3] || "");
+      const events = state.timelineEvents || [
+        {
+          id: "ev-1",
+          document_id: state.documents[0]?.id || "doc-1",
+          filename: state.documents[0]?.filename || "notes.txt",
+          entity_name: personName,
+          event_text: `${personName} graduated from Stanford in 2018.`,
+          event_date: "2018",
+          chunk_id: 1,
+          page: 1,
+          chunk_content: `${personName} graduated from Stanford in 2018.`,
+        },
+        {
+          id: "ev-2",
+          document_id: state.documents[0]?.id || "doc-1",
+          filename: state.documents[0]?.filename || "notes.txt",
+          entity_name: personName,
+          event_text: `In September 2020, ${personName} joined Acme Corp as Principal Architect.`,
+          event_date: "September 2020",
+          chunk_id: 2,
+          page: 2,
+          chunk_content: `In September 2020, ${personName} joined Acme Corp as Principal Architect.`,
+        },
+      ];
+      await route.fulfill({ json: events });
+      return;
+    }
+
     if (pathname === "/api/graph") {
       const graph = state.graph || {
         nodes: state.people.map((p) => ({
@@ -764,5 +795,50 @@ test.describe("Connectivity and interaction resilience", () => {
     await expect(passageHighlight).toBeVisible();
     await expect(passageHighlight).toContainText("Maya Patel coordinates the security architecture review.");
   });
+
+  test("clicking persona offers timeline view alongside passages and graph with citation triggers", async ({ page }) => {
+    const textDoc = documentRecord("doc-notes", "team-charter.txt", ["Maya Patel"], { content_type: "text/plain" });
+    const state = createApiState({
+      documents: [textDoc],
+      people: [personRecord("Maya Patel")],
+    });
+    state.fileContents = {
+      "doc-notes": "Maya Patel graduated from Stanford in 2018.\\nIn September 2020, Maya joined Acme Corp as Principal Architect.",
+    };
+    await openApp(page, state);
+
+    // 1. Verify Subjects, Graph, and Timeline tabs are visible
+    const subjectsTab = page.getByRole("tab", { name: /Subjects/i });
+    const graphTab = page.getByRole("tab", { name: /Graph/i });
+    const timelineTab = page.getByRole("tab", { name: /Timeline/i });
+    await expect(subjectsTab).toBeVisible();
+    await expect(graphTab).toBeVisible();
+    await expect(timelineTab).toBeVisible();
+
+    // 2. Click persona card to focus on Maya Patel
+    const personCard = page.locator(".person-card").filter({ hasText: "Maya Patel" });
+    await expect(personCard).toBeVisible();
+    await personCard.click();
+
+    // 3. Click Timeline tab to view chronological events
+    await timelineTab.click();
+    await expect(timelineTab).toHaveAttribute("aria-selected", "true");
+
+    // 4. Verify milestones rendered with dates and descriptions
+    const timelineContainer = page.locator(".persona-timeline-container");
+    await expect(timelineContainer).toBeVisible();
+    await expect(timelineContainer).toContainText("2018");
+    await expect(timelineContainer).toContainText("September 2020");
+    await expect(timelineContainer).toContainText("Maya Patel graduated from Stanford in 2018.");
+
+    // 5. Test jump to citation trigger slides open the reader drawer
+    const citationTrigger = page.locator('[data-testid="timeline-citation-jump"]').first();
+    await expect(citationTrigger).toBeVisible();
+    await citationTrigger.click();
+
+    const drawer = page.getByTestId("citation-viewer-drawer");
+    await expect(drawer).toBeVisible();
+  });
 });
+
 
