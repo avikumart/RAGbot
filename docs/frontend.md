@@ -36,3 +36,12 @@ The browser never supplies a user identifier directly to FastAPI. The frontend r
 ## Build configuration
 
 `frontend/vite.config.ts` is the frontend build entrypoint. Supporting tool configuration is grouped in `frontend/config/`; `frontend/tsconfig.json` remains beside the app so the build can discover TypeScript paths. The root `package.json`, Docker files, and Compose manifest are intentionally kept at the repository root because they orchestrate the entire stack.
+
+## Visual PDF Citation Viewer
+
+`frontend/components/pdf-viewer.tsx` provides an in-browser slide-out document viewer with:
+- **PDF.js Canvas Rendering**: Renders vector-sharp PDF pages dynamically with zoom in/out (`+`, `-`, `Fit`) and page navigation controls (`‹`, `›`, `X / Y`).
+- **Deep Linking**: Automatically jumps to the cited page (`source.page`) when clicking an inline citation badge `[n]` or source card in the chat interface.
+- **Passage Highlighting**: Highlights matching text excerpts with animated yellow overlay bounding boxes on the PDF canvas and an active citation excerpt callout banner.
+- **Non-PDF Fallback**: Gracefully renders structured plaintext and extracted chunks with highlighted `<mark>` passages for TXT, CSV, HTML, MD, and DOCX files.
+- **Byte-Range Streaming**: Fetches document bytes via `GET /api/documents/:documentId/file` through the proxy with HTTP Range request support.

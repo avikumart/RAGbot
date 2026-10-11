@@ -41,6 +41,8 @@ export async function proxyPersonagraph(request: Request, path: string) {
   if (contentType) forwardedHeaders.set("content-type", contentType);
   const accept = request.headers.get("accept");
   if (accept) forwardedHeaders.set("accept", accept);
+  const range = request.headers.get("range");
+  if (range) forwardedHeaders.set("range", range);
   if (secret) {
     forwardedHeaders.set("x-personagraph-owner", owner);
     forwardedHeaders.set("x-personagraph-owner-timestamp", timestamp);
@@ -50,7 +52,7 @@ export async function proxyPersonagraph(request: Request, path: string) {
     );
   }
 
-  const body = request.method === "GET" || request.method === "DELETE"
+  const body = request.method === "GET" || request.method === "DELETE" || request.method === "HEAD"
     ? undefined
     : await request.arrayBuffer();
   const upstream = await fetch(`${API_URL}${path}`, {
@@ -63,5 +65,13 @@ export async function proxyPersonagraph(request: Request, path: string) {
   if (upstreamContentType) responseHeaders.set("content-type", upstreamContentType);
   const cacheControl = upstream.headers.get("cache-control");
   if (cacheControl) responseHeaders.set("cache-control", cacheControl);
+  const contentRange = upstream.headers.get("content-range");
+  if (contentRange) responseHeaders.set("content-range", contentRange);
+  const acceptRanges = upstream.headers.get("accept-ranges");
+  if (acceptRanges) responseHeaders.set("accept-ranges", acceptRanges);
+  const contentLength = upstream.headers.get("content-length");
+  if (contentLength) responseHeaders.set("content-length", contentLength);
+  const contentDisposition = upstream.headers.get("content-disposition");
+  if (contentDisposition) responseHeaders.set("content-disposition", contentDisposition);
   return new Response(upstream.body, { status: upstream.status, headers: responseHeaders });
 }

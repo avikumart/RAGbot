@@ -90,6 +90,52 @@ Content-Type: multipart/form-data
 #### Response (`201 Created`)
 Returns the created `DocumentRecord`.
 
+#### Stream Document File
+```http
+GET /api/documents/{document_id}/file
+Range: bytes=0-1023
+```
+Streams the raw document bytes for in-browser visual viewing and PDF rendering. Supports HTTP `Range: bytes=...` requests for chunked streaming.
+
+##### Response (`200 OK` or `206 Partial Content`)
+- **Headers**:
+  - `Content-Type`: `application/pdf`, `text/plain`, `text/csv`, etc.
+  - `Content-Range`: `bytes 0-1023/142850` (on 206 Partial Content)
+  - `Content-Length`: Length in bytes of the returned range or full payload
+  - `Accept-Ranges`: `bytes`
+  - `Content-Disposition`: `inline; filename="team-profiles.pdf"`
+
+#### Get Document Details
+```http
+GET /api/documents/{document_id}
+```
+Returns metadata and extracted text chunks for a document.
+
+##### Response (`200 OK`)
+```json
+{
+  "id": "e4b2d183...",
+  "filename": "team-profiles.pdf",
+  "content_type": "application/pdf",
+  "size_bytes": 142850,
+  "uploaded_at": "2026-08-19T10:00:00Z",
+  "chunk_count": 12,
+  "people": ["Alice Chen", "Bob Smith"],
+  "index_status": "ready",
+  "index_error": null,
+  "index_updated_at": "2026-08-19T10:00:05Z",
+  "chunks": [
+    {
+      "id": 1,
+      "ordinal": 0,
+      "page": 1,
+      "content": "Excerpt...",
+      "people": ["Alice Chen"]
+    }
+  ]
+}
+```
+
 #### Delete Document
 ```http
 DELETE /api/documents/{document_id}

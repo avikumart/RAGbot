@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { API_ERROR_MESSAGE, api, parseApiError } from "../lib/api.ts";
+import { API_ERROR_MESSAGE, api, getDocumentFileUrl, parseApiError } from "../lib/api.ts";
 
 function jsonResponse(payload) {
   return new Response(JSON.stringify(payload), {
@@ -52,4 +52,8 @@ test("routes /api/health to same-origin path", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("getDocumentFileUrl returns correct endpoint path", () => {
+  assert.equal(getDocumentFileUrl("doc-123"), "/api/documents/doc-123/file");
 });

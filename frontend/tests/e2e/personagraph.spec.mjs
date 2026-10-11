@@ -148,6 +148,50 @@ async function installApi(page, state) {
       return;
     }
 
+    if (pathname.includes("/file") && method === "GET") {
+      const parts = pathname.split("/");
+      const docId = parts[parts.indexOf("documents") + 1];
+      const doc = state.documents.find((d) => d.id === docId);
+      const isPdf = doc?.filename?.endsWith(".pdf");
+      const content = state.fileContents?.[docId] || (doc ? `Content of ${doc.filename}: Jordan Lee leads the program and owns the rollout plan.` : "Sample document text.");
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": isPdf ? "application/pdf" : "text/plain",
+          "accept-ranges": "bytes",
+          "content-length": String(Buffer.byteLength(content)),
+        },
+        body: content,
+      });
+      return;
+    }
+
+    if (pathname.startsWith("/api/documents/") && method === "GET") {
+      const docId = pathname.split("/").pop();
+      const doc = state.documents.find((d) => d.id === docId);
+      if (!doc) {
+        await route.fulfill({ status: 404, json: { detail: "Document not found." } });
+        return;
+      }
+      const fullText = state.fileContents?.[docId] || `Content of ${doc.filename}: Jordan Lee leads the program and owns the rollout plan.`;
+      await route.fulfill({
+        status: 200,
+        json: {
+          ...doc,
+          chunks: [
+            {
+              id: 1,
+              ordinal: 0,
+              page: 1,
+              content: fullText,
+              people: doc.people,
+            },
+          ],
+        },
+      });
+      return;
+    }
+
     if (pathname.startsWith("/api/documents/") && method === "DELETE") {
       const documentId = pathname.split("/").pop();
       state.documents = state.documents.filter((document) => document.id !== documentId);
@@ -641,6 +685,84 @@ test.describe("Connectivity and interaction resilience", () => {
     // Switch back to Subjects tab and verify selection persisted
     await page.getByRole("tab", { name: /Subjects/i }).click();
     await expect(page.locator(".person-card.is-selected")).toBeVisible();
+  });
+
+  test("clicking citation badge [n] opens side-by-side citation viewer with deep linking and page navigation", async ({ page }) => {
+    const pdfDoc = documentRecord("doc-pdf", "financial-report.pdf", ["Jordan Lee"], { content_type: "application/pdf" });
+    const pdfSource = source(1, pdfDoc, "Jordan Lee oversees the rollout budget for 2026.", 0.95, 3);
+    const state = createApiState({
+      documents: [pdfDoc],
+      people: [personRecord("Jordan Lee")],
+      onChat: () => ({
+        answer: "Jordan Lee oversees the rollout budget [1].",
+        sources: [pdfSource],
+      }),
+    });
+    await openApp(page, state);
+
+    await ask(page, "Who oversees the budget?");
+
+    // Verify inline citation badge is rendered
+    const citationBadge = page.getByTestId("citation-badge-1");
+    await expect(citationBadge).toBeVisible();
+    await expect(citationBadge).toHaveText("1");
+
+    // Click the inline citation badge [1]
+    await citationBadge.click();
+
+    // Verify citation drawer slides open
+    const drawer = page.getByTestId("citation-viewer-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toContainText("financial-report.pdf");
+
+    // Verify deep linking to cited page and active citation callout
+    const highlightBanner = page.getByTestId("citation-highlight");
+    await expect(highlightBanner).toBeVisible();
+    await expect(highlightBanner).toContainText("Jordan Lee oversees the rollout budget for 2026.");
+    await expect(highlightBanner).toContainText("Page 3");
+
+    // Verify close button dismisses drawer
+    const closeBtn = page.getByTestId("close-viewer-btn");
+    await expect(closeBtn).toBeVisible();
+    await closeBtn.click();
+    await expect(drawer).not.toBeVisible();
+  });
+
+  test("clicking source card view button opens viewer drawer with matching excerpt", async ({ page }) => {
+    const textDoc = documentRecord("doc-notes", "team-charter.txt", ["Maya Patel"], { content_type: "text/plain" });
+    const excerpt = "Maya Patel coordinates the security architecture review.";
+    const notesSource = source(1, textDoc, excerpt, 0.92);
+    const state = createApiState({
+      documents: [textDoc],
+      people: [personRecord("Maya Patel")],
+      onChat: () => ({
+        answer: "Maya coordinates the architecture review [1].",
+        sources: [notesSource],
+      }),
+    });
+    state.fileContents = {
+      "doc-notes": `Team charter.\n\nMaya Patel coordinates the security architecture review.\n\nApproved in 2026.`,
+    };
+    await openApp(page, state);
+
+    await ask(page, "What is Maya's responsibility?");
+
+    // Expand source card and click View in document button
+    const sourceCard = page.getByTestId("source-card-1");
+    await expect(sourceCard).toBeVisible();
+    await sourceCard.locator("summary").click();
+    const viewBtn = page.getByTestId("view-source-btn-1");
+    await expect(viewBtn).toBeVisible();
+    await viewBtn.click();
+
+    // Verify drawer opened with non-PDF text viewer and passage highlight
+    const drawer = page.getByTestId("citation-viewer-drawer");
+    await expect(drawer).toBeVisible();
+    const nonPdfViewer = page.getByTestId("non-pdf-viewer");
+    await expect(nonPdfViewer).toBeVisible();
+    const passageHighlight = page.getByTestId("passage-highlight");
+    await expect(passageHighlight).toBeVisible();
+    await expect(passageHighlight).toContainText("Maya Patel coordinates the security architecture review.");
   });
 });
 
