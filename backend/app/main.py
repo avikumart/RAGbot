@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 class ChatRequest(BaseModel):
     message: str = Field(min_length=2, max_length=2000)
     document_ids: list[str] | None = None
+    collection_id: str | None = Field(default=None, max_length=128)
     person: str | None = Field(default=None, max_length=160)
     top_k: int = Field(default=4, ge=1, le=8)
     session_id: str | None = Field(default=None, min_length=8, max_length=128)
@@ -56,13 +57,37 @@ class ChatRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     topic: str | None = Field(default=None, max_length=120)
     document_ids: list[str] | None = None
+    collection_id: str | None = Field(default=None, max_length=128)
     person: str | None = Field(default=None, max_length=160)
 
 
 class UpdateSessionRequest(BaseModel):
     topic: str | None = Field(default=None, max_length=120)
     document_ids: list[str] | None = None
+    collection_id: str | None = Field(default=None, max_length=128)
     person: str | None = Field(default=None, max_length=160)
+
+
+class CreateCollectionRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    document_ids: list[str] | None = None
+
+
+class UpdateCollectionRequest(BaseModel):
+    name: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    document_ids: list[str] | None = None
+
+
+class CollectionDocumentsRequest(BaseModel):
+    document_ids: list[str] | None = None
+    document_id: str | None = None
+    add: list[str] | None = None
+    remove: list[str] | None = None
+    add_document_ids: list[str] | None = None
+    remove_document_ids: list[str] | None = None
+    action: str | None = Field(default=None, pattern="^(add|remove|set)$")
 
 
 class IngestUrlRequest(BaseModel):
@@ -253,34 +278,200 @@ def create_app(
             "components": components,
         }
 
+    def resolve_collection_scope(
+        owner_id: str,
+        collection_id: str | None,
+        explicit_doc_ids: list[str] | None = None,
+    ) -> list[str] | None:
+        doc_ids = list(explicit_doc_ids) if explicit_doc_ids is not None else None
+        if collection_id and collection_id != "all":
+            collection = store.get_collection(collection_id, owner_id=owner_id)
+            if not collection:
+                raise HTTPException(status_code=404, detail="Collection not found.")
+            col_doc_ids = list(collection["document_ids"])
+            if doc_ids is not None:
+                col_set = set(col_doc_ids)
+                doc_ids = [d for d in doc_ids if d in col_set]
+            else:
+                doc_ids = col_doc_ids
+        return doc_ids
+
     @app.get("/api/documents")
     def documents(request: Request) -> list[dict]:
         owner_id = request_owner(request, settings)
         return store.list_documents(owner_id=owner_id)
 
-    @app.get("/api/people")
-    def people(request: Request, document_id: list[str] | None = None) -> list[dict]:
+    @app.get("/api/collections")
+    def list_collections(request: Request) -> list[dict]:
         owner_id = request_owner(request, settings)
-        return store.list_people(document_id, owner_id=owner_id)
+        return store.list_collections(owner_id)
+
+    @app.post("/api/collections", status_code=201)
+    def create_collection(payload: CreateCollectionRequest, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
+        clean_name = payload.name.strip()
+        if not clean_name:
+            raise HTTPException(status_code=422, detail="A collection name is required.")
+        try:
+            return store.create_collection(
+                owner_id,
+                name=clean_name,
+                description=payload.description,
+                document_ids=payload.document_ids,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Document not found.") from exc
+
+    @app.get("/api/collections/{collection_id}")
+    def get_collection(collection_id: str, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
+        collection = store.get_collection(collection_id, owner_id=owner_id)
+        if not collection:
+            raise HTTPException(status_code=404, detail="Collection not found.")
+        return collection
+
+    @app.patch("/api/collections/{collection_id}")
+    def update_collection(
+        collection_id: str, payload: UpdateCollectionRequest, request: Request
+    ) -> dict:
+        owner_id = request_owner(request, settings)
+        fields = payload.model_fields_set
+        if "name" in fields and not (payload.name or "").strip():
+            raise HTTPException(status_code=422, detail="A collection name is required.")
+        try:
+            collection = store.update_collection(
+                owner_id,
+                collection_id,
+                name=payload.name.strip() if payload.name else None,
+                description=payload.description,
+                document_ids=payload.document_ids,
+                update_name="name" in fields,
+                update_description="description" in fields,
+                update_document_ids="document_ids" in fields,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Document not found.") from exc
+        if not collection:
+            raise HTTPException(status_code=404, detail="Collection not found.")
+        return collection
+
+    @app.delete("/api/collections/{collection_id}")
+    def delete_collection(collection_id: str, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
+        if not store.delete_collection(owner_id, collection_id):
+            raise HTTPException(status_code=404, detail="Collection not found.")
+        return {"deleted": True, "id": collection_id}
+
+    @app.post("/api/collections/{collection_id}/documents")
+    def update_collection_documents(
+        collection_id: str, payload: CollectionDocumentsRequest, request: Request
+    ) -> dict:
+        owner_id = request_owner(request, settings)
+        existing = store.get_collection(collection_id, owner_id=owner_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Collection not found.")
+
+        add_ids: list[str] = [
+            *(payload.add or []),
+            *(payload.add_document_ids or []),
+        ]
+        remove_ids: list[str] = [
+            *(payload.remove or []),
+            *(payload.remove_document_ids or []),
+        ]
+        if payload.document_id:
+            if payload.action == "remove":
+                remove_ids.append(payload.document_id)
+            else:
+                add_ids.append(payload.document_id)
+
+        set_ids: list[str] | None = None
+        if payload.document_ids is not None:
+            if payload.action == "remove":
+                remove_ids.extend(payload.document_ids)
+            elif payload.action == "set":
+                set_ids = payload.document_ids
+            elif payload.action == "add":
+                add_ids.extend(payload.document_ids)
+            else:
+                if len(payload.document_ids) == 0 and not add_ids and not remove_ids:
+                    set_ids = []
+                elif (
+                    not add_ids
+                    and not remove_ids
+                    and existing["document_ids"]
+                    and set(payload.document_ids) < set(existing["document_ids"])
+                ):
+                    set_ids = payload.document_ids
+                else:
+                    add_ids.extend(payload.document_ids)
+
+        try:
+            updated = store.update_collection_documents(
+                owner_id,
+                collection_id,
+                add_document_ids=add_ids,
+                remove_document_ids=remove_ids,
+                set_document_ids=set_ids,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Document not found.") from exc
+        if not updated:
+            raise HTTPException(status_code=404, detail="Collection not found.")
+        return updated
+
+    @app.delete("/api/collections/{collection_id}/documents/{document_id}")
+    def remove_collection_document(
+        collection_id: str, document_id: str, request: Request
+    ) -> dict:
+        owner_id = request_owner(request, settings)
+        updated = store.update_collection_documents(
+            owner_id,
+            collection_id,
+            remove_document_ids=[document_id],
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Collection not found.")
+        return updated
+
+    @app.get("/api/people")
+    def people(
+        request: Request,
+        document_id: list[str] | None = None,
+        collection_id: str | None = None,
+    ) -> list[dict]:
+        owner_id = request_owner(request, settings)
+        doc_ids = resolve_collection_scope(owner_id, collection_id, document_id)
+        if doc_ids is not None and not doc_ids:
+            return []
+        return store.list_people(doc_ids, owner_id=owner_id)
 
     @app.get("/api/people/{name}/timeline")
     def person_timeline(
         name: str,
         request: Request,
         document_id: str | None = None,
+        collection_id: str | None = None,
     ) -> list[dict]:
         owner_id = request_owner(request, settings)
-        doc_ids = [document_id] if document_id and document_id != "all" else None
+        explicit_docs = [document_id] if document_id and document_id != "all" else None
+        doc_ids = resolve_collection_scope(owner_id, collection_id, explicit_docs)
+        if doc_ids is not None and not doc_ids:
+            return []
         return store.get_person_timeline(name, document_ids=doc_ids, owner_id=owner_id)
 
     @app.get("/api/graph")
     def graph(
         request: Request,
         document_id: str | None = None,
+        collection_id: str | None = None,
         person: str | None = None,
     ) -> dict:
         owner_id = request_owner(request, settings)
-        doc_ids = [document_id] if document_id and document_id != "all" else None
+        explicit_docs = [document_id] if document_id and document_id != "all" else None
+        doc_ids = resolve_collection_scope(owner_id, collection_id, explicit_docs)
+        if doc_ids is not None and not doc_ids:
+            return {"nodes": [], "edges": []}
         return store.get_graph(document_ids=doc_ids, owner_id=owner_id, person=person)
 
     @app.post("/api/documents", status_code=201)
@@ -611,10 +802,13 @@ def create_app(
     @app.post("/api/sessions", status_code=201)
     def create_session(payload: CreateSessionRequest, request: Request) -> dict:
         owner_id = request_owner(request, settings)
+        doc_ids = resolve_collection_scope(
+            owner_id, payload.collection_id, payload.document_ids
+        )
         return store.create_chat_session(
             owner_id,
             topic=(payload.topic or "New conversation").strip() or "New conversation",
-            document_ids=payload.document_ids,
+            document_ids=doc_ids,
             person=payload.person,
         )
 
@@ -637,17 +831,21 @@ def create_app(
 
     @app.patch("/api/sessions/{session_id}")
     def update_session(session_id: str, payload: UpdateSessionRequest, request: Request) -> dict:
+        owner_id = request_owner(request, settings)
         fields = payload.model_fields_set
         if "topic" in fields and not (payload.topic or "").strip():
             raise HTTPException(status_code=422, detail="A conversation topic is required.")
+        doc_ids = resolve_collection_scope(
+            owner_id, payload.collection_id, payload.document_ids
+        )
         session = store.update_chat_session(
-            request_owner(request, settings),
+            owner_id,
             session_id,
             topic=payload.topic.strip() if payload.topic else None,
-            document_ids=payload.document_ids,
+            document_ids=doc_ids,
             person=payload.person,
             update_topic="topic" in fields,
-            update_document_ids="document_ids" in fields,
+            update_document_ids="document_ids" in fields or "collection_id" in fields,
             update_person="person" in fields,
         )
         if not session:
@@ -667,6 +865,11 @@ def create_app(
         history: list[dict] = []
         scoped_person = payload.person
         scoped_doc_ids = payload.document_ids
+        scoped_collection_id = (
+            payload.collection_id
+            if payload.collection_id and payload.collection_id != "all"
+            else None
+        )
         is_streaming = payload.stream or "text/event-stream" in request.headers.get("accept", "")
 
         if payload.session_id:
@@ -717,19 +920,32 @@ def create_app(
             history = session.get("messages", [])[-6:]
             if scoped_person is None and session.get("person"):
                 scoped_person = session.get("person")
-            if scoped_doc_ids is None and session.get("document_ids"):
+            if scoped_doc_ids is None and not scoped_collection_id and session.get("document_ids"):
                 scoped_doc_ids = session.get("document_ids")
+
+        if scoped_collection_id:
+            scoped_doc_ids = resolve_collection_scope(
+                owner_id, scoped_collection_id, scoped_doc_ids
+            )
 
         owner_documents = store.list_documents(owner_id=owner_id)
         if not owner_documents:
             raise HTTPException(status_code=409, detail="Upload a document before asking a question.")
         owner_doc_ids = {doc["id"] for doc in owner_documents}
-        if scoped_doc_ids is not None:
+        if scoped_collection_id:
+            scoped_doc_ids = [doc_id for doc_id in (scoped_doc_ids or []) if doc_id in owner_doc_ids]
+        elif scoped_doc_ids is not None:
             scoped_doc_ids = [doc_id for doc_id in scoped_doc_ids if doc_id in owner_doc_ids]
             if not scoped_doc_ids:
                 raise HTTPException(status_code=404, detail="Scoped document not found.")
         else:
             scoped_doc_ids = list(owner_doc_ids)
+
+        persisted_doc_ids = (
+            scoped_doc_ids
+            if (payload.document_ids is not None or scoped_collection_id is not None)
+            else None
+        )
 
         retrieval_res = hybrid_retrieve(
             store,
@@ -822,7 +1038,7 @@ def create_app(
                     session_id=payload.session_id,
                     client_message_id=client_message_id,
                     content=payload.message,
-                    document_ids=payload.document_ids,
+                    document_ids=persisted_doc_ids,
                     person=payload.person,
                     answer=full_answer,
                     sources=sources,
@@ -891,7 +1107,7 @@ def create_app(
             session_id=payload.session_id,
             client_message_id=client_message_id,
             content=payload.message,
-            document_ids=payload.document_ids,
+            document_ids=persisted_doc_ids,
             person=payload.person,
             answer=answer,
             sources=sources,

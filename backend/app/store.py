@@ -663,6 +663,7 @@ class Store:
             )
             if self.database_component == "sqlite":
                 connection.execute("DELETE FROM chunks_fts WHERE document_id = ?", (document_id,))
+            connection.execute("DELETE FROM collection_documents WHERE document_id = ?", (document_id,))
             connection.execute("DELETE FROM entity_relationships WHERE document_id = ?", (document_id,))
             connection.execute("DELETE FROM entity_events WHERE document_id = ?", (document_id,))
             connection.execute("DELETE FROM documents WHERE id = ?", (document_id,))
@@ -1196,4 +1197,241 @@ class Store:
             # Sort chronologically by date
             events.sort(key=lambda ev: parse_date_sort_key(ev["event_date"]))
             return events
+
+    @staticmethod
+    def _collection_dict(row: Any, document_ids: list[str]) -> dict:
+        return {
+            "id": row["id"],
+            "owner_id": row["owner_id"],
+            "name": row["name"],
+            "description": row["description"],
+            "created_at": row["created_at"],
+            "document_ids": document_ids,
+            "document_count": len(document_ids),
+        }
+
+    def _get_collection_document_ids(
+        self, connection: DatabaseConnection, collection_id: str, owner_id: str
+    ) -> list[str]:
+        rows = connection.execute(
+            """SELECT collection_documents.document_id
+            FROM collection_documents
+            JOIN documents ON documents.id = collection_documents.document_id
+            WHERE collection_documents.collection_id = ? AND documents.owner_id = ?
+            ORDER BY documents.uploaded_at DESC, collection_documents.document_id ASC""",
+            (collection_id, owner_id),
+        ).fetchall()
+        return [row["document_id"] for row in rows]
+
+    def _verify_owned_documents(
+        self, connection: DatabaseConnection, owner_id: str, document_ids: Iterable[str]
+    ) -> list[str]:
+        unique_ids = list(dict.fromkeys(doc_id for doc_id in document_ids if doc_id))
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = connection.execute(
+            f"SELECT id FROM documents WHERE owner_id = ? AND id IN ({placeholders})",
+            [owner_id, *unique_ids],
+        ).fetchall()
+        found_ids = {row["id"] for row in rows}
+        missing = [doc_id for doc_id in unique_ids if doc_id not in found_ids]
+        if missing:
+            raise KeyError(missing[0])
+        return unique_ids
+
+    def create_collection(
+        self,
+        owner_id: str,
+        *,
+        name: str,
+        description: str | None = None,
+        document_ids: Iterable[str] | None = None,
+    ) -> dict:
+        collection_id = uuid4().hex
+        created_at = datetime.now(UTC).isoformat()
+        clean_name = name.strip()
+        clean_desc = description.strip() if isinstance(description, str) else None
+        with self.connect() as connection:
+            owned_doc_ids = self._verify_owned_documents(
+                connection, owner_id, document_ids or []
+            )
+            connection.execute(
+                """INSERT INTO collections (id, owner_id, name, description, created_at)
+                VALUES (?, ?, ?, ?, ?)""",
+                (collection_id, owner_id, clean_name, clean_desc, created_at),
+            )
+            if owned_doc_ids:
+                connection.executemany(
+                    """INSERT INTO collection_documents (collection_id, document_id)
+                    VALUES (?, ?)
+                    ON CONFLICT(collection_id, document_id) DO NOTHING""",
+                    [(collection_id, doc_id) for doc_id in owned_doc_ids],
+                )
+            row = connection.execute(
+                "SELECT * FROM collections WHERE id = ? AND owner_id = ?",
+                (collection_id, owner_id),
+            ).fetchone()
+            member_ids = self._get_collection_document_ids(connection, collection_id, owner_id)
+            return self._collection_dict(row, member_ids)
+
+    def list_collections(self, owner_id: str) -> list[dict]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM collections
+                WHERE owner_id = ?
+                ORDER BY created_at DESC, id DESC""",
+                (owner_id,),
+            ).fetchall()
+            return [
+                self._collection_dict(
+                    row, self._get_collection_document_ids(connection, row["id"], owner_id)
+                )
+                for row in rows
+            ]
+
+    def get_collection(self, collection_id: str, owner_id: str) -> dict | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM collections WHERE id = ? AND owner_id = ?",
+                (collection_id, owner_id),
+            ).fetchone()
+            if not row:
+                return None
+            member_ids = self._get_collection_document_ids(connection, collection_id, owner_id)
+            return self._collection_dict(row, member_ids)
+
+    def update_collection(
+        self,
+        owner_id: str,
+        collection_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        document_ids: Iterable[str] | None = None,
+        update_name: bool = False,
+        update_description: bool = False,
+        update_document_ids: bool = False,
+    ) -> dict | None:
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM collections WHERE id = ? AND owner_id = ?",
+                (collection_id, owner_id),
+            ).fetchone()
+            if not existing:
+                return None
+
+            assignments: list[str] = []
+            params: list[Any] = []
+            if update_name and name is not None:
+                assignments.append("name = ?")
+                params.append(name.strip())
+            if update_description:
+                assignments.append("description = ?")
+                params.append(description.strip() if isinstance(description, str) else None)
+            if assignments:
+                params.extend([collection_id, owner_id])
+                connection.execute(
+                    f"UPDATE collections SET {', '.join(assignments)} WHERE id = ? AND owner_id = ?",
+                    params,
+                )
+
+            if update_document_ids:
+                owned_doc_ids = self._verify_owned_documents(
+                    connection, owner_id, document_ids or []
+                )
+                connection.execute(
+                    "DELETE FROM collection_documents WHERE collection_id = ?",
+                    (collection_id,),
+                )
+                if owned_doc_ids:
+                    connection.executemany(
+                        """INSERT INTO collection_documents (collection_id, document_id)
+                        VALUES (?, ?)
+                        ON CONFLICT(collection_id, document_id) DO NOTHING""",
+                        [(collection_id, doc_id) for doc_id in owned_doc_ids],
+                    )
+
+            row = connection.execute(
+                "SELECT * FROM collections WHERE id = ? AND owner_id = ?",
+                (collection_id, owner_id),
+            ).fetchone()
+            member_ids = self._get_collection_document_ids(connection, collection_id, owner_id)
+            return self._collection_dict(row, member_ids)
+
+    def delete_collection(self, owner_id: str, collection_id: str) -> bool:
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT 1 FROM collections WHERE id = ? AND owner_id = ?",
+                (collection_id, owner_id),
+            ).fetchone()
+            if not existing:
+                return False
+            connection.execute(
+                "DELETE FROM collection_documents WHERE collection_id = ?",
+                (collection_id,),
+            )
+            connection.execute(
+                "DELETE FROM collections WHERE id = ? AND owner_id = ?",
+                (collection_id, owner_id),
+            )
+            return True
+
+    def update_collection_documents(
+        self,
+        owner_id: str,
+        collection_id: str,
+        *,
+        add_document_ids: Iterable[str] | None = None,
+        remove_document_ids: Iterable[str] | None = None,
+        set_document_ids: Iterable[str] | None = None,
+    ) -> dict | None:
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM collections WHERE id = ? AND owner_id = ?",
+                (collection_id, owner_id),
+            ).fetchone()
+            if not existing:
+                return None
+
+            if set_document_ids is not None:
+                owned_set_ids = self._verify_owned_documents(
+                    connection, owner_id, set_document_ids
+                )
+                connection.execute(
+                    "DELETE FROM collection_documents WHERE collection_id = ?",
+                    (collection_id,),
+                )
+                if owned_set_ids:
+                    connection.executemany(
+                        """INSERT INTO collection_documents (collection_id, document_id)
+                        VALUES (?, ?)
+                        ON CONFLICT(collection_id, document_id) DO NOTHING""",
+                        [(collection_id, doc_id) for doc_id in owned_set_ids],
+                    )
+            else:
+                if add_document_ids:
+                    owned_add_ids = self._verify_owned_documents(
+                        connection, owner_id, add_document_ids
+                    )
+                    if owned_add_ids:
+                        connection.executemany(
+                            """INSERT INTO collection_documents (collection_id, document_id)
+                            VALUES (?, ?)
+                            ON CONFLICT(collection_id, document_id) DO NOTHING""",
+                            [(collection_id, doc_id) for doc_id in owned_add_ids],
+                        )
+                if remove_document_ids:
+                    remove_list = list(dict.fromkeys(d for d in remove_document_ids if d))
+                    if remove_list:
+                        placeholders = ",".join("?" for _ in remove_list)
+                        connection.execute(
+                            f"""DELETE FROM collection_documents
+                            WHERE collection_id = ? AND document_id IN ({placeholders})""",
+                            [collection_id, *remove_list],
+                        )
+
+            member_ids = self._get_collection_document_ids(connection, collection_id, owner_id)
+            return self._collection_dict(existing, member_ids)
+
 

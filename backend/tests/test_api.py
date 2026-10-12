@@ -376,6 +376,7 @@ class FakeApiVectors:
         self.indexed = []
         self.deleted = []
         self.candidates = []
+        self.search_calls = []
 
     def health(self):
         return {
@@ -393,6 +394,14 @@ class FakeApiVectors:
         return {doc_id: (1, 0) for doc_id in document_ids}
 
     def search(self, question, document_ids, limit, owner_id=None):
+        self.search_calls.append(
+            {
+                "question": question,
+                "document_ids": document_ids,
+                "limit": limit,
+                "owner_id": owner_id,
+            }
+        )
         return self.candidates[:limit]
 
     def delete_document(self, document_id):
@@ -1035,5 +1044,263 @@ def test_stream_document_file_owner_authorization(tmp_path, monkeypatch):
         client.__exit__(None, None, None)
 
 
+def test_collections_crud_and_preserve_documents_on_delete(tmp_path):
+    app = create_app(tmp_path)
+    with TestClient(app) as client:
+        doc1 = client.post(
+            "/api/documents",
+            files={"file": ("phoenix.txt", b"Jordan Lee leads the Phoenix migration rollout.", "text/plain")},
+        ).json()
+        doc2 = client.post(
+            "/api/documents",
+            files={"file": ("atlas.txt", b"Maya Patel leads the Atlas security audit.", "text/plain")},
+        ).json()
+
+        # Initially empty collections
+        assert client.get("/api/collections").json() == []
+
+        # Create collection with initial document_ids
+        create_resp = client.post(
+            "/api/collections",
+            json={
+                "name": "Phoenix Project",
+                "description": "Migration docs",
+                "document_ids": [doc1["id"]],
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        collection = create_resp.json()
+        assert collection["name"] == "Phoenix Project"
+        assert collection["description"] == "Migration docs"
+        assert collection["document_ids"] == [doc1["id"]]
+        assert collection["document_count"] == 1
+
+        # List collections
+        listed = client.get("/api/collections").json()
+        assert len(listed) == 1
+        assert listed[0]["id"] == collection["id"]
+        assert listed[0]["document_ids"] == [doc1["id"]]
+
+        # Get single collection
+        fetched = client.get(f"/api/collections/{collection['id']}").json()
+        assert fetched["id"] == collection["id"]
+
+        # Rename / update collection via PATCH
+        patch_resp = client.patch(
+            f"/api/collections/{collection['id']}",
+            json={"name": "Phoenix & Atlas", "description": "Combined scope"},
+        )
+        assert patch_resp.status_code == 200
+        patched = patch_resp.json()
+        assert patched["name"] == "Phoenix & Atlas"
+        assert patched["description"] == "Combined scope"
+        assert patched["document_ids"] == [doc1["id"]]
+
+        # Assign doc2 and keep doc1 via POST /api/collections/{id}/documents
+        assign_resp = client.post(
+            f"/api/collections/{collection['id']}/documents",
+            json={"add_document_ids": [doc2["id"]]},
+        )
+        assert assign_resp.status_code == 200
+        assigned = assign_resp.json()
+        assert set(assigned["document_ids"]) == {doc1["id"], doc2["id"]}
+        assert assigned["document_count"] == 2
+
+        # Remove doc1 via POST /api/collections/{id}/documents
+        remove_resp = client.post(
+            f"/api/collections/{collection['id']}/documents",
+            json={"remove_document_ids": [doc1["id"]]},
+        )
+        assert remove_resp.status_code == 200
+        removed = remove_resp.json()
+        assert removed["document_ids"] == [doc2["id"]]
+        assert removed["document_count"] == 1
+
+        # Delete collection and verify underlying documents are preserved
+        del_resp = client.delete(f"/api/collections/{collection['id']}")
+        assert del_resp.status_code == 200
+        assert del_resp.json() == {"deleted": True, "id": collection["id"]}
+        assert client.get("/api/collections").json() == []
+
+        remaining_docs = client.get("/api/documents").json()
+        assert {d["id"] for d in remaining_docs} == {doc1["id"], doc2["id"]}
 
 
+def test_collection_scoped_chat_and_graph_filtering(tmp_path):
+    vectors = FakeApiVectors()
+    app = create_app(tmp_path, vector_service=vectors)
+    with TestClient(app) as client:
+        doc1 = client.post(
+            "/api/documents",
+            files={
+                "file": (
+                    "phoenix.txt",
+                    b"Jordan Lee leads the Phoenix migration rollout in 2024. Jordan Lee coordinates with Sam Rivera.",
+                    "text/plain",
+                )
+            },
+        ).json()
+        doc2 = client.post(
+            "/api/documents",
+            files={
+                "file": (
+                    "atlas.txt",
+                    b"Maya Patel owns the Atlas security audit in 2025. Maya Patel coordinates with Alex Kim.",
+                    "text/plain",
+                )
+            },
+        ).json()
+
+        col_phoenix = client.post(
+            "/api/collections",
+            json={"name": "Phoenix Only", "document_ids": [doc1["id"]]},
+        ).json()
+        col_empty = client.post(
+            "/api/collections",
+            json={"name": "Empty Folder"},
+        ).json()
+
+        # Chat scoped to Phoenix collection only retrieves from doc1
+        chat_phoenix = client.post(
+            "/api/chat",
+            json={
+                "message": "Who leads the project or security audit?",
+                "collection_id": col_phoenix["id"],
+            },
+        )
+        assert chat_phoenix.status_code == 200
+        payload = chat_phoenix.json()
+        assert payload["sources"]
+        assert {s["document_id"] for s in payload["sources"]} == {doc1["id"]}
+        assert vectors.search_calls[-1]["document_ids"] == [doc1["id"]]
+
+        # Chat scoped to Phoenix collection asking about Maya Patel (only in doc2) returns no sources from doc2
+        chat_maya_in_phoenix = client.post(
+            "/api/chat",
+            json={
+                "message": "What does Maya Patel own in Atlas?",
+                "collection_id": col_phoenix["id"],
+            },
+        )
+        assert chat_maya_in_phoenix.status_code == 200
+        assert all(s["document_id"] == doc1["id"] for s in chat_maya_in_phoenix.json()["sources"])
+
+        # Chat scoped to an empty collection retrieves 0 sources (does not fall back to all documents)
+        chat_empty = client.post(
+            "/api/chat",
+            json={
+                "message": "What does Jordan Lee lead?",
+                "collection_id": col_empty["id"],
+            },
+        )
+        assert chat_empty.status_code == 200
+        assert chat_empty.json()["sources"] == []
+
+        # Graph scoped to Phoenix collection only includes Phoenix entities
+        graph_phoenix = client.get(
+            "/api/graph", params={"collection_id": col_phoenix["id"]}
+        )
+        assert graph_phoenix.status_code == 200
+        node_names = {n["label"] for n in graph_phoenix.json()["nodes"]}
+        assert "Jordan Lee" in node_names
+        assert "Maya Patel" not in node_names
+
+        # People endpoint scoped to Phoenix collection
+        people_phoenix = client.get(
+            "/api/people", params={"collection_id": col_phoenix["id"]}
+        )
+        assert people_phoenix.status_code == 200
+        people_names = {p["name"] for p in people_phoenix.json()}
+        assert "Jordan Lee" in people_names
+        assert "Maya Patel" not in people_names
+
+
+def test_collections_multi_tenant_isolation(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTH_PROXY_SECRET", "test-proxy-secret")
+    app = create_app(tmp_path)
+    alice = owner_headers("alice@example.com")
+    bob = owner_headers("bob@example.com")
+
+    with TestClient(app) as client:
+        # Unauthenticated requests rejected
+        assert client.get("/api/collections").status_code == 401
+        assert client.post("/api/collections", json={"name": "Test"}).status_code == 401
+
+        alice_doc = client.post(
+            "/api/documents",
+            headers=alice,
+            files={"file": ("alice.txt", b"Alice Smith owns the alpha architecture.", "text/plain")},
+        ).json()
+        bob_doc = client.post(
+            "/api/documents",
+            headers=bob,
+            files={"file": ("bob.txt", b"Bob Jones owns the beta deployment.", "text/plain")},
+        ).json()
+
+        # Alice creates a collection with her document
+        alice_col_resp = client.post(
+            "/api/collections",
+            headers=alice,
+            json={"name": "Alice Alpha", "document_ids": [alice_doc["id"]]},
+        )
+        assert alice_col_resp.status_code == 201
+        alice_col = alice_col_resp.json()
+
+        # Alice cannot create a collection containing Bob's document
+        cross_create = client.post(
+            "/api/collections",
+            headers=alice,
+            json={"name": "Stolen", "document_ids": [bob_doc["id"]]},
+        )
+        assert cross_create.status_code == 404
+
+        # Bob cannot see Alice's collection
+        assert client.get("/api/collections", headers=bob).json() == []
+        assert client.get(f"/api/collections/{alice_col['id']}", headers=bob).status_code == 404
+
+        # Bob cannot rename, modify documents, or delete Alice's collection
+        assert (
+            client.patch(
+                f"/api/collections/{alice_col['id']}",
+                headers=bob,
+                json={"name": "Hacked"},
+            ).status_code
+            == 404
+        )
+        assert (
+            client.post(
+                f"/api/collections/{alice_col['id']}/documents",
+                headers=bob,
+                json={"add_document_ids": [bob_doc["id"]]},
+            ).status_code
+            == 404
+        )
+        assert client.delete(f"/api/collections/{alice_col['id']}", headers=bob).status_code == 404
+
+        # Alice cannot add Bob's document to her collection
+        assert (
+            client.post(
+                f"/api/collections/{alice_col['id']}/documents",
+                headers=alice,
+                json={"add_document_ids": [bob_doc["id"]]},
+            ).status_code
+            == 404
+        )
+
+        # Bob cannot scope chat or graph to Alice's collection
+        assert (
+            client.post(
+                "/api/chat",
+                headers=bob,
+                json={"message": "What does Alice own?", "collection_id": alice_col["id"]},
+            ).status_code
+            == 404
+        )
+        assert (
+            client.get(
+                "/api/graph",
+                headers=bob,
+                params={"collection_id": alice_col["id"]},
+            ).status_code
+            == 404
+        )

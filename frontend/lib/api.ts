@@ -68,9 +68,20 @@ export type Source = {
   score: number;
 };
 
+export type CollectionRecord = {
+  id: string;
+  owner_id?: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  document_ids: string[];
+  document_count?: number;
+};
+
 export type ChatRequest = {
   message: string;
   document_ids?: string[];
+  collection_id?: string;
   person?: string;
   session_id?: string;
   client_message_id: string;
@@ -155,6 +166,8 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
     path === "/api/chat" ||
     path.startsWith("/api/sessions") ||
     path.startsWith("/api/documents") ||
+    path.startsWith("/api/collections") ||
+    path.startsWith("/api/graph") ||
     path.startsWith("/api/people");
   const baseUrl = authenticated ? AUTHENTICATED_API_URL : API_URL;
   const response = await fetch(`${baseUrl}${path}`, options);
@@ -276,14 +289,19 @@ export async function streamChat(
   }
 }
 
-export async function fetchGraph(documentId?: string, person?: string): Promise<GraphData> {
+export async function fetchGraph(
+  documentId?: string,
+  person?: string,
+  collectionId?: string
+): Promise<GraphData> {
   const params = new URLSearchParams();
   if (documentId && documentId !== "all") params.set("document_id", documentId);
+  if (collectionId && collectionId !== "all") params.set("collection_id", collectionId);
   if (person) params.set("person", person);
   const qs = params.toString();
   const response = await fetch(`/api/graph${qs ? `?${qs}` : ""}`);
   if (!response.ok) {
-    throw new Error(await parseApiError(response, "Failed to load relationship graph"));
+    throw new Error(await parseApiError(response));
   }
   return response.json();
 }
@@ -307,7 +325,7 @@ export type DocumentDetails = DocumentRecord & {
 export async function fetchDocumentDetails(documentId: string): Promise<DocumentDetails> {
   const response = await fetch(`/api/documents/${documentId}`);
   if (!response.ok) {
-    throw new Error(await parseApiError(response, "Failed to load document details"));
+    throw new Error(await parseApiError(response));
   }
   return response.json();
 }
@@ -332,17 +350,75 @@ export type TimelineEvent = {
 
 export async function fetchPersonTimeline(
   personName: string,
-  documentId?: string
+  documentId?: string,
+  collectionId?: string
 ): Promise<TimelineEvent[]> {
   const params = new URLSearchParams();
   if (documentId && documentId !== "all") params.set("document_id", documentId);
+  if (collectionId && collectionId !== "all") params.set("collection_id", collectionId);
   const qs = params.toString();
   const response = await fetch(`/api/people/${encodeURIComponent(personName)}/timeline${qs ? `?${qs}` : ""}`);
   if (!response.ok) {
-    throw new Error(await parseApiError(response, "Failed to load timeline events"));
+    throw new Error(await parseApiError(response));
   }
   return response.json();
 }
+
+export async function fetchCollections(): Promise<CollectionRecord[]> {
+  return api<CollectionRecord[]>("/api/collections");
+}
+
+export async function createCollection(payload: {
+  name: string;
+  description?: string | null;
+  document_ids?: string[];
+}): Promise<CollectionRecord> {
+  return api<CollectionRecord>("/api/collections", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateCollection(
+  collectionId: string,
+  payload: {
+    name?: string;
+    description?: string | null;
+    document_ids?: string[];
+  }
+): Promise<CollectionRecord> {
+  return api<CollectionRecord>(`/api/collections/${encodeURIComponent(collectionId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteCollection(collectionId: string): Promise<{ deleted: boolean; id?: string }> {
+  return api<{ deleted: boolean; id?: string }>(`/api/collections/${encodeURIComponent(collectionId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function updateCollectionDocuments(
+  collectionId: string,
+  payload: {
+    add?: string[];
+    remove?: string[];
+    add_document_ids?: string[];
+    remove_document_ids?: string[];
+    document_ids?: string[];
+    action?: "add" | "remove" | "set";
+  }
+): Promise<CollectionRecord> {
+  return api<CollectionRecord>(`/api/collections/${encodeURIComponent(collectionId)}/documents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 
 
 

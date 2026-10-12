@@ -136,6 +136,24 @@ MIGRATION_008_TEMPORAL_EVENTS = (
 )
 
 
+MIGRATION_009_DOCUMENT_COLLECTIONS = (
+    """CREATE TABLE IF NOT EXISTS collections (
+        id TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT,
+        created_at TEXT NOT NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS collections_owner_created_idx ON collections(owner_id, created_at DESC)",
+    """CREATE TABLE IF NOT EXISTS collection_documents (
+        collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        PRIMARY KEY (collection_id, document_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS collection_documents_document_idx ON collection_documents(document_id)",
+)
+
+
 MIGRATIONS = (
     (1, MIGRATION_001_INITIAL_SCHEMA),
     (2, MIGRATION_002_PENDING_FILE_CLEANUP),
@@ -145,7 +163,9 @@ MIGRATIONS = (
     (6, MIGRATION_006_ENTITY_ALIASES),
     (7, MIGRATION_007_ENTITY_RELATIONSHIPS),
     (8, MIGRATION_008_TEMPORAL_EVENTS),
+    (9, MIGRATION_009_DOCUMENT_COLLECTIONS),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
+
 
 

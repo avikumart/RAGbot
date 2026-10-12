@@ -1,9 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import type { DragEvent, RefObject } from "react";
+import type { DragEvent, FormEvent, RefObject } from "react";
 import { DocumentIndexStatus } from "@/app/document-index-status.mjs";
-import type { ChatSession, DocumentRecord } from "@/lib/api";
+import type { ChatSession, CollectionRecord, DocumentRecord } from "@/lib/api";
 import { UploadQueue, type QueueItem } from "./upload-queue";
 
 type DocumentLibraryProps = {
@@ -26,6 +26,13 @@ type DocumentLibraryProps = {
   onRetryQueueItem?: (item: QueueItem) => void;
   onClearQueue?: () => void;
   onImportUrl?: (url: string) => void;
+  collections?: CollectionRecord[];
+  selectedCollection?: string | null;
+  onSelectCollection?: (collectionId: string | null) => void;
+  onCreateCollection?: (name: string, description?: string | null) => Promise<void> | void;
+  onUpdateCollection?: (collectionId: string, name: string, description?: string | null) => Promise<void> | void;
+  onDeleteCollection?: (collection: CollectionRecord) => Promise<void> | void;
+  onToggleCollectionDocument?: (collectionId: string, documentId: string, shouldInclude: boolean) => Promise<void> | void;
 };
 
 function humanSize(bytes: number) {
@@ -119,15 +126,59 @@ export function DocumentLibrary({
   onRetryQueueItem,
   onClearQueue,
   onImportUrl,
+  collections = [],
+  selectedCollection = null,
+  onSelectCollection,
+  onCreateCollection,
+  onUpdateCollection,
+  onDeleteCollection,
+  onToggleCollectionDocument,
 }: DocumentLibraryProps) {
   const [dragging, setDragging] = useState(false);
   const [urlInput, setUrlInput] = useState("");
+  const [creatingCollection, setCreatingCollection] = useState(false);
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newCollectionDesc, setNewCollectionDesc] = useState("");
+  const [editingCollectionId, setEditingCollectionId] = useState<string | null>(null);
+  const [editCollectionName, setEditCollectionName] = useState("");
+  const [editCollectionDesc, setEditCollectionDesc] = useState("");
+  const [managingDocsForId, setManagingDocsForId] = useState<string | null>(null);
+
+  const activeCollection = collections.find((c) => c.id === selectedCollection) ?? null;
+  const displayedDocuments = activeCollection
+    ? documents.filter((d) => activeCollection.document_ids.includes(d.id))
+    : documents;
 
   async function onDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setDragging(false);
     const files = await extractFilesFromDataTransfer(event.dataTransfer);
     if (files.length) onUpload(files);
+  }
+
+  async function handleCreateSubmit(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = newCollectionName.trim();
+    if (!trimmed || !onCreateCollection) return;
+    await onCreateCollection(trimmed, newCollectionDesc.trim() || null);
+    setNewCollectionName("");
+    setNewCollectionDesc("");
+    setCreatingCollection(false);
+  }
+
+  async function handleEditSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!editingCollectionId || !onUpdateCollection) return;
+    const trimmed = editCollectionName.trim();
+    if (!trimmed) return;
+    await onUpdateCollection(editingCollectionId, trimmed, editCollectionDesc.trim() || null);
+    setEditingCollectionId(null);
+  }
+
+  function startEditing(col: CollectionRecord) {
+    setEditingCollectionId(col.id);
+    setEditCollectionName(col.name);
+    setEditCollectionDesc(col.description ?? "");
   }
 
   return (
@@ -215,6 +266,17 @@ export function DocumentLibrary({
         <span>Library</span>
         <div className="section-actions">
           <span>{documents.length}</span>
+          {onCreateCollection && (
+            <button
+              className="status-check-button new-collection-button"
+              type="button"
+              onClick={() => setCreatingCollection((prev) => !prev)}
+              aria-label="New collection"
+              data-testid="new-collection-btn"
+            >
+              + Collection
+            </button>
+          )}
           <button
             className="status-check-button"
             type="button"
@@ -226,12 +288,210 @@ export function DocumentLibrary({
         </div>
       </div>
 
+      {creatingCollection && (
+        <form
+          className="collection-form"
+          onSubmit={(e) => void handleCreateSubmit(e)}
+          data-testid="create-collection-form"
+        >
+          <input
+            type="text"
+            className="collection-input"
+            placeholder="Collection name (e.g. Q3 Due Diligence)"
+            value={newCollectionName}
+            onChange={(e) => setNewCollectionName(e.target.value)}
+            aria-label="Collection name"
+            data-testid="collection-name-input"
+            maxLength={120}
+            required
+          />
+          <input
+            type="text"
+            className="collection-input"
+            placeholder="Description (optional)"
+            value={newCollectionDesc}
+            onChange={(e) => setNewCollectionDesc(e.target.value)}
+            aria-label="Collection description"
+            data-testid="collection-description-input"
+            maxLength={500}
+          />
+          <div className="collection-form-actions">
+            <button
+              type="submit"
+              className="collection-submit-btn"
+              disabled={!newCollectionName.trim()}
+              data-testid="save-collection-btn"
+            >
+              Create
+            </button>
+            <button
+              type="button"
+              className="collection-cancel-btn"
+              onClick={() => {
+                setCreatingCollection(false);
+                setNewCollectionName("");
+                setNewCollectionDesc("");
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {collections.length > 0 && (
+        <div className="collection-filter-bar" role="group" aria-label="Collection filters" data-testid="collection-filter-bar">
+          <button
+            type="button"
+            className={`collection-chip ${!selectedCollection ? "is-active" : ""}`}
+            onClick={() => {
+              onSelectCollection?.(null);
+              onSelectDocument("all");
+            }}
+            aria-pressed={!selectedCollection}
+            data-testid="collection-chip-all"
+          >
+            <span>All</span>
+            <small>{documents.length}</small>
+          </button>
+          {collections.map((col) => (
+            <button
+              key={col.id}
+              type="button"
+              className={`collection-chip ${selectedCollection === col.id ? "is-active" : ""}`}
+              onClick={() => {
+                const next = selectedCollection === col.id ? null : col.id;
+                onSelectCollection?.(next);
+              }}
+              aria-pressed={selectedCollection === col.id}
+              data-testid={`collection-chip-${col.id}`}
+              title={col.description || col.name}
+            >
+              <span aria-hidden="true">📁</span>
+              <span className="collection-chip-name">{col.name}</span>
+              <small>{col.document_ids.length}</small>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {activeCollection && (
+        <div className="collection-folder-card" data-testid="active-collection-card">
+          {editingCollectionId === activeCollection.id ? (
+            <form className="collection-edit-form" onSubmit={(e) => void handleEditSubmit(e)}>
+              <input
+                type="text"
+                className="collection-input"
+                value={editCollectionName}
+                onChange={(e) => setEditCollectionName(e.target.value)}
+                aria-label="Edit collection name"
+                data-testid="edit-collection-name-input"
+                maxLength={120}
+                required
+              />
+              <input
+                type="text"
+                className="collection-input"
+                value={editCollectionDesc}
+                onChange={(e) => setEditCollectionDesc(e.target.value)}
+                placeholder="Description (optional)"
+                aria-label="Edit collection description"
+                data-testid="edit-collection-description-input"
+                maxLength={500}
+              />
+              <div className="collection-form-actions">
+                <button
+                  type="submit"
+                  className="collection-submit-btn"
+                  disabled={!editCollectionName.trim()}
+                  data-testid="confirm-edit-collection-btn"
+                >
+                  Save
+                </button>
+                <button
+                  type="button"
+                  className="collection-cancel-btn"
+                  onClick={() => setEditingCollectionId(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="collection-folder-header">
+              <div className="collection-folder-title">
+                <strong>📁 {activeCollection.name}</strong>
+                {activeCollection.description && <small>{activeCollection.description}</small>}
+              </div>
+              <div className="collection-folder-actions">
+                <button
+                  type="button"
+                  className="collection-action-btn"
+                  onClick={() =>
+                    setManagingDocsForId((prev) => (prev === activeCollection.id ? null : activeCollection.id))
+                  }
+                  aria-label={`Assign documents to ${activeCollection.name}`}
+                  data-testid="manage-collection-docs-btn"
+                >
+                  Assign ({activeCollection.document_ids.length})
+                </button>
+                <button
+                  type="button"
+                  className="collection-action-btn"
+                  onClick={() => startEditing(activeCollection)}
+                  aria-label={`Edit ${activeCollection.name}`}
+                  data-testid="edit-collection-btn"
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="collection-action-btn is-danger"
+                  onClick={() => onDeleteCollection?.(activeCollection)}
+                  aria-label={`Delete ${activeCollection.name}`}
+                  data-testid="delete-collection-btn"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          )}
+
+          {(managingDocsForId === activeCollection.id || activeCollection.document_ids.length === 0) && documents.length > 0 && (
+            <div className="collection-assign-list" data-testid="collection-assign-list">
+              <span className="collection-assign-title">Assign documents to folder:</span>
+              {documents.map((doc) => {
+                const isMember = activeCollection.document_ids.includes(doc.id);
+                return (
+                  <label key={doc.id} className="collection-assign-item">
+                    <input
+                      type="checkbox"
+                      checked={isMember}
+                      onChange={(e) => {
+                        setManagingDocsForId(activeCollection.id);
+                        onToggleCollectionDocument?.(activeCollection.id, doc.id, e.target.checked);
+                      }}
+                      aria-label={`Include ${doc.filename} in ${activeCollection.name}`}
+                      data-testid={`assign-doc-${doc.id}`}
+                    />
+                    <span title={doc.filename}>{doc.filename}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
       <nav className="document-list" aria-label="Document scope">
         <button
           type="button"
-          className={`document-item all-documents ${selectedDocument === "all" ? "is-active" : ""}`}
-          onClick={() => onSelectDocument("all")}
-          aria-current={selectedDocument === "all" ? "true" : undefined}
+          className={`document-item all-documents ${selectedDocument === "all" && !selectedCollection ? "is-active" : ""}`}
+          onClick={() => {
+            onSelectCollection?.(null);
+            onSelectDocument("all");
+          }}
+          aria-current={selectedDocument === "all" && !selectedCollection ? "true" : undefined}
         >
           <span className="document-icon">◎</span>
           <span className="document-copy">
@@ -254,40 +514,55 @@ export function DocumentLibrary({
             <span aria-hidden="true">◇</span>
             <span>Your uploaded documents will appear here.</span>
           </div>
-        ) : documents.map((document) => (
-          <div className={`document-row ${selectedDocument === document.id ? "is-active" : ""}`} key={document.id}>
-            <button
-              type="button"
-              className="document-item"
-              onClick={() => onSelectDocument(document)}
-              aria-current={selectedDocument === document.id ? "true" : undefined}
-              title={document.filename}
-            >
-              <span className={`file-badge is-${documentKind(document.filename).toLowerCase()}`}>{documentKind(document.filename)}</span>
-              <span className="document-copy">
-                <strong title={document.filename}>{document.filename}</strong>
-                <small className="document-meta">
-                  <span>{documentKind(document.filename)}</span>
-                  <span>{humanSize(document.size_bytes)}</span>
-                  <span>{document.people.length} {document.people.length === 1 ? "person" : "people"}</span>
-                </small>
-                <DocumentIndexStatus status={document.index_status} />
-              </span>
-            </button>
-            <button
-              className="remove-button"
-              type="button"
-              aria-label={`Remove ${document.filename}`}
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onRemoveDocument(document);
-              }}
-            >
-              ×
-            </button>
+        ) : !displayedDocuments.length ? (
+          <div className="document-state" data-testid="empty-collection-state">
+            <span aria-hidden="true">📁</span>
+            <span>No documents assigned to this collection yet.</span>
           </div>
-        ))}
+        ) : displayedDocuments.map((document) => {
+          const memberCollections = collections.filter((c) => c.document_ids.includes(document.id));
+          return (
+            <div className={`document-row ${selectedDocument === document.id ? "is-active" : ""}`} key={document.id}>
+              <button
+                type="button"
+                className="document-item"
+                onClick={() => onSelectDocument(document)}
+                aria-current={selectedDocument === document.id ? "true" : undefined}
+                title={document.filename}
+              >
+                <span className={`file-badge is-${documentKind(document.filename).toLowerCase()}`}>{documentKind(document.filename)}</span>
+                <span className="document-copy">
+                  <strong title={document.filename}>{document.filename}</strong>
+                  <small className="document-meta">
+                    <span>{documentKind(document.filename)}</span>
+                    <span>{humanSize(document.size_bytes)}</span>
+                    <span>{document.people.length} {document.people.length === 1 ? "person" : "people"}</span>
+                  </small>
+                  {memberCollections.length > 0 && (
+                    <span className="document-collection-tags">
+                      {memberCollections.map((c) => (
+                        <span key={c.id} className="document-collection-tag">📁 {c.name}</span>
+                      ))}
+                    </span>
+                  )}
+                  <DocumentIndexStatus status={document.index_status} />
+                </span>
+              </button>
+              <button
+                className="remove-button"
+                type="button"
+                aria-label={`Remove ${document.filename}`}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onRemoveDocument(document);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          );
+        })}
       </nav>
 
       <div className="conversation-history-heading">
@@ -318,3 +593,4 @@ export function DocumentLibrary({
     </aside>
   );
 }
+

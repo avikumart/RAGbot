@@ -88,3 +88,65 @@ test("fetchPersonTimeline requests correct endpoint with url encoding and docume
   }
 });
 
+test("collection API client helpers route to /api/collections endpoints and scope graph/timeline", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url, method: init.method || "GET", body: init.body ? JSON.parse(init.body) : null });
+    return new Response(
+      JSON.stringify({
+        id: "col-1",
+        name: "Phoenix",
+        description: "Migration docs",
+        created_at: "2026-08-01T12:00:00Z",
+        document_ids: ["doc-1"],
+        document_count: 1,
+        nodes: [],
+        edges: [],
+        deleted: "col-1",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+
+  try {
+    const {
+      createCollection,
+      deleteCollection,
+      fetchGraph,
+      fetchPersonTimeline,
+      updateCollection,
+      updateCollectionDocuments,
+    } = await import("../lib/api.ts");
+
+    await createCollection({ name: "Phoenix", description: "Migration docs", document_ids: ["doc-1"] });
+    assert.equal(calls[0].url, "/api/collections");
+    assert.equal(calls[0].method, "POST");
+    assert.deepEqual(calls[0].body, {
+      name: "Phoenix",
+      description: "Migration docs",
+      document_ids: ["doc-1"],
+    });
+
+    await updateCollection("col-1", { name: "Phoenix v2" });
+    assert.equal(calls[1].url, "/api/collections/col-1");
+    assert.equal(calls[1].method, "PATCH");
+
+    await updateCollectionDocuments("col-1", { add_document_ids: ["doc-2"] });
+    assert.equal(calls[2].url, "/api/collections/col-1/documents");
+    assert.equal(calls[2].method, "POST");
+    assert.deepEqual(calls[2].body, { add_document_ids: ["doc-2"] });
+
+    await fetchGraph(undefined, undefined, "col-1");
+    assert.equal(calls[3].url, "/api/graph?collection_id=col-1");
+
+    await fetchPersonTimeline("Jordan Lee", undefined, "col-1");
+    assert.equal(calls[4].url, "/api/people/Jordan%20Lee/timeline?collection_id=col-1");
+
+    await deleteCollection("col-1");
+    assert.equal(calls[5].url, "/api/collections/col-1");
+    assert.equal(calls[5].method, "DELETE");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
