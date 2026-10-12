@@ -312,4 +312,37 @@ export async function fetchDocumentDetails(documentId: string): Promise<Document
   return response.json();
 }
 
+export type TimelineEvent = {
+  id: string;
+  document_id: string;
+  filename: string;
+  entity_name: string;
+  event_text: string;
+  event_date: string;
+  chunk_id: number | null;
+  page: number | null;
+  chunk_content?: string;
+  source_chunk?: {
+    id: number;
+    document_id: string;
+    page: number | null;
+    content: string;
+  } | null;
+};
+
+export async function fetchPersonTimeline(
+  personName: string,
+  documentId?: string
+): Promise<TimelineEvent[]> {
+  const params = new URLSearchParams();
+  if (documentId && documentId !== "all") params.set("document_id", documentId);
+  const qs = params.toString();
+  const response = await fetch(`/api/people/${encodeURIComponent(personName)}/timeline${qs ? `?${qs}` : ""}`);
+  if (!response.ok) {
+    throw new Error(await parseApiError(response, "Failed to load timeline events"));
+  }
+  return response.json();
+}
+
+
 

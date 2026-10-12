@@ -122,6 +122,20 @@ MIGRATION_007_ENTITY_RELATIONSHIPS = (
 )
 
 
+MIGRATION_008_TEMPORAL_EVENTS = (
+    """CREATE TABLE IF NOT EXISTS entity_events (
+        id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        entity_name TEXT NOT NULL,
+        event_text TEXT NOT NULL,
+        event_date TEXT NOT NULL,
+        chunk_id INTEGER REFERENCES chunks(id) ON DELETE SET NULL
+    )""",
+    "CREATE INDEX IF NOT EXISTS entity_events_document_id_idx ON entity_events(document_id)",
+    "CREATE INDEX IF NOT EXISTS entity_events_entity_name_idx ON entity_events(entity_name)",
+)
+
+
 MIGRATIONS = (
     (1, MIGRATION_001_INITIAL_SCHEMA),
     (2, MIGRATION_002_PENDING_FILE_CLEANUP),
@@ -130,6 +144,7 @@ MIGRATIONS = (
     (5, MIGRATION_005_MULTI_TENANT_ISOLATION),
     (6, MIGRATION_006_ENTITY_ALIASES),
     (7, MIGRATION_007_ENTITY_RELATIONSHIPS),
+    (8, MIGRATION_008_TEMPORAL_EVENTS),
 )
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
 

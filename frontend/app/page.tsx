@@ -3,9 +3,10 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { DocumentLibrary } from "@/components/document-library";
 import { PersonaGraph } from "@/components/persona-graph";
+import { PersonaTimeline } from "@/components/persona-timeline";
 import { PDFViewer } from "@/components/pdf-viewer";
 import type { QueueItem } from "@/components/upload-queue";
-import { api, fetchGraph, streamChat } from "@/lib/api";
+import { api, fetchGraph, fetchPersonTimeline, streamChat } from "@/lib/api";
 import type {
   BatchUploadResponse,
   ChatMessage,
@@ -15,6 +16,7 @@ import type {
   GraphData,
   PersonRecord,
   Source,
+  TimelineEvent,
 } from "@/lib/api";
 import { documentIndexStatus } from "./document-index-status.mjs";
 
@@ -157,10 +159,12 @@ export default function Home() {
   const [notice, setNotice] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [cacheHydrated, setCacheHydrated] = useState(false);
-  const [activeSideTab, setActiveSideTab] = useState<"people" | "graph">("people");
+  const [activeSideTab, setActiveSideTab] = useState<"people" | "graph" | "timeline">("people");
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
   const [activeCitation, setActiveCitation] = useState<Source | null>(null);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[] | null>(null);
+  const [timelineLoading, setTimelineLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -180,6 +184,34 @@ export default function Home() {
       cancelled = true;
     };
   }, [selectedDocument, documents]);
+
+  const effectiveTimelinePerson = selectedPerson || (activeSideTab === "timeline" ? visiblePeople[0]?.name ?? null : null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadTimeline() {
+      if (!effectiveTimelinePerson) {
+        setTimelineEvents(null);
+        return;
+      }
+      setTimelineLoading(true);
+      try {
+        const events = await fetchPersonTimeline(
+          effectiveTimelinePerson,
+          selectedDocument === "all" ? undefined : selectedDocument
+        );
+        if (!cancelled) setTimelineEvents(events);
+      } catch {
+        if (!cancelled) setTimelineEvents([]);
+      } finally {
+        if (!cancelled) setTimelineLoading(false);
+      }
+    }
+    loadTimeline();
+    return () => {
+      cancelled = true;
+    };
+  }, [effectiveTimelinePerson, selectedDocument]);
 
   const scopedDocument = documents.find((document) => document.id === selectedDocument);
   const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
@@ -929,6 +961,15 @@ export default function Home() {
             >
               Persona Graph {graphData?.nodes?.length ? `(${graphData.nodes.length})` : ""}
             </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeSideTab === "timeline"}
+              className={`people-tab-btn ${activeSideTab === "timeline" ? "is-active" : ""}`}
+              onClick={() => setActiveSideTab("timeline")}
+            >
+              Timeline {selectedPerson ? `(${selectedPerson})` : ""}
+            </button>
           </div>
           {activeSideTab === "graph" ? (
             <PersonaGraph
@@ -946,6 +987,17 @@ export default function Home() {
               }}
               loading={graphLoading}
             />
+          ) : activeSideTab === "timeline" ? (
+            <PersonaTimeline
+              personName={effectiveTimelinePerson}
+              events={timelineEvents}
+              loading={timelineLoading}
+              onSelectCitation={(source) => setActiveCitation(source)}
+              onSelectPerson={(name) => {
+                choosePerson(name);
+                setActiveSideTab("timeline");
+              }}
+            />
           ) : (
             <>
               <div className="people-heading">
@@ -961,18 +1013,32 @@ export default function Home() {
                     const distinctAliases = rawAliases.filter((a) => a.toLowerCase() !== person.name.toLowerCase());
                     return (
                       <div className="person-entry" key={person.canonical_id || person.normalized}>
-                        <button
-                          type="button"
-                          className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
-                          onClick={() => choosePerson(person.name)}
-                        >
-                          <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
-                          <span>
-                            <strong>{person.name}</strong>
-                            <small>{subjectDescription(person)}</small>
-                          </span>
-                          <b aria-hidden="true">›</b>
-                        </button>
+                        <div className="person-card-row">
+                          <button
+                            type="button"
+                            className={`person-card ${selectedPerson === person.name ? "is-selected" : ""}`}
+                            onClick={() => choosePerson(person.name)}
+                          >
+                            <span className={`person-avatar tone-${index % 5}`}>{person.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>
+                            <span>
+                              <strong>{person.name}</strong>
+                              <small>{subjectDescription(person)}</small>
+                            </span>
+                            <b aria-hidden="true">›</b>
+                          </button>
+                          <button
+                            type="button"
+                            className="person-timeline-quickbtn"
+                            title="View timeline"
+                            aria-label="View timeline"
+                            onClick={() => {
+                              setSelectedPerson(person.name);
+                              setActiveSideTab("timeline");
+                            }}
+                          >
+                            ⏱
+                          </button>
+                        </div>
                         {distinctAliases.length > 0 && (
                           <details className="person-aliases-details">
                             <summary className="person-aliases-summary">

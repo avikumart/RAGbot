@@ -57,3 +57,34 @@ test("routes /api/health to same-origin path", async () => {
 test("getDocumentFileUrl returns correct endpoint path", () => {
   assert.equal(getDocumentFileUrl("doc-123"), "/api/documents/doc-123/file");
 });
+
+test("fetchPersonTimeline requests correct endpoint with url encoding and document scoping", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return new Response(JSON.stringify([{
+      id: "ev-1",
+      document_id: "doc-1",
+      filename: "test.pdf",
+      entity_name: "Maya Patel",
+      event_text: "Graduated in 2018",
+      event_date: "2018",
+      chunk_id: 1,
+      page: 1,
+    }]), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const { fetchPersonTimeline } = await import("../lib/api.ts");
+    const result = await fetchPersonTimeline("Maya Patel", "doc-1");
+    assert.equal(requestedUrl, "/api/people/Maya%20Patel/timeline?document_id=doc-1");
+    assert.equal(result.length, 1);
+    assert.equal(result[0].event_date, "2018");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+

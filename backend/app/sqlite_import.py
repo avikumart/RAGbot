@@ -35,6 +35,14 @@ TABLE_COLUMNS = {
         "source_type",
         "target_type",
     ),
+    "entity_events": (
+        "id",
+        "document_id",
+        "entity_name",
+        "event_text",
+        "event_date",
+        "chunk_id",
+    ),
     "vector_index_state": (
         "document_id",
         "status",
