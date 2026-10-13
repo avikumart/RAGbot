@@ -298,6 +298,9 @@ def hybrid_retrieve(
     graphrag_depth: int = 2,
     return_graph_context: bool = False,
 ) -> tuple[list[str], list[dict], str] | tuple[list[str], list[dict], str, str]:
+    if document_ids is not None and len(document_ids) == 0:
+        res = RetrievalResult([], [], "lexical", graph_context="")
+        return ([], [], "lexical", "") if return_graph_context else res
     chunks = store.get_chunks(document_ids, owner_id=owner_id)
     known_people = store.list_people(document_ids, owner_id=owner_id)
     standalone_query, people = reformulate_query(

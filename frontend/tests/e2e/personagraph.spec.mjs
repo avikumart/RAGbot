@@ -38,10 +38,11 @@ function source(index, document, excerpt, score = 0.9, page = null) {
   };
 }
 
-function createApiState({ documents = [], people = [], uploads = [], onChat } = {}) {
+function createApiState({ documents = [], people = [], collections = [], uploads = [], onChat } = {}) {
   return {
     documents: [...documents],
     people: [...people],
+    collections: [...collections],
     uploads: [...uploads],
     onChat,
     sessions: [],
@@ -105,6 +106,74 @@ async function installApi(page, state) {
 
     if (pathname === "/api/health") {
       await route.fulfill({ json: { status: "ok" } });
+      return;
+    }
+
+    if (pathname === "/api/collections" && method === "GET") {
+      await route.fulfill({ json: state.collections });
+      return;
+    }
+
+    if (pathname === "/api/collections" && method === "POST") {
+      const body = request.postDataJSON();
+      const docIds = body.document_ids ?? [];
+      const created = {
+        id: `col-${state.collections.length + 1}`,
+        name: body.name,
+        description: body.description ?? null,
+        created_at: timestamp,
+        document_ids: docIds,
+        document_count: docIds.length,
+      };
+      state.collections = [created, ...state.collections];
+      await route.fulfill({ status: 201, json: created });
+      return;
+    }
+
+    if (pathname.startsWith("/api/collections/") && pathname.endsWith("/documents") && method === "POST") {
+      const parts = pathname.split("/");
+      const colId = parts[3];
+      const body = request.postDataJSON();
+      const target = state.collections.find((c) => c.id === colId);
+      if (!target) {
+        await route.fulfill({ status: 404, json: { detail: "Collection not found." } });
+        return;
+      }
+      const nextSet = new Set(target.document_ids);
+      for (const id of body.add_document_ids ?? body.add ?? []) nextSet.add(id);
+      for (const id of body.remove_document_ids ?? body.remove ?? []) nextSet.delete(id);
+      const updated = {
+        ...target,
+        document_ids: Array.from(nextSet),
+        document_count: nextSet.size,
+      };
+      state.collections = state.collections.map((c) => (c.id === colId ? updated : c));
+      await route.fulfill({ json: updated });
+      return;
+    }
+
+    if (pathname.startsWith("/api/collections/") && method === "PATCH") {
+      const colId = pathname.split("/").pop();
+      const body = request.postDataJSON();
+      const target = state.collections.find((c) => c.id === colId);
+      if (!target) {
+        await route.fulfill({ status: 404, json: { detail: "Collection not found." } });
+        return;
+      }
+      const updated = {
+        ...target,
+        name: body.name ?? target.name,
+        description: body.description !== undefined ? body.description : target.description,
+      };
+      state.collections = state.collections.map((c) => (c.id === colId ? updated : c));
+      await route.fulfill({ json: updated });
+      return;
+    }
+
+    if (pathname.startsWith("/api/collections/") && method === "DELETE") {
+      const colId = pathname.split("/").pop();
+      state.collections = state.collections.filter((c) => c.id !== colId);
+      await route.fulfill({ json: { deleted: colId } });
       return;
     }
 
@@ -839,6 +908,73 @@ test.describe("Connectivity and interaction resilience", () => {
     const drawer = page.getByTestId("citation-viewer-drawer");
     await expect(drawer).toBeVisible();
   });
+
+  test("creates a collection, assigns documents, scopes chat queries, renames, and deletes while preserving documents", async ({ page }) => {
+    const docAlpha = documentRecord("doc-alpha", "alpha-spec.txt", ["Jordan Lee"]);
+    const docBeta = documentRecord("doc-beta", "beta-notes.txt", ["Maya Patel"]);
+    const state = createApiState({
+      documents: [docAlpha, docBeta],
+      people: [personRecord("Jordan Lee"), personRecord("Maya Patel")],
+      onChat: ({ request }) => {
+        expect(request.collection_id).toBe("col-1");
+        expect(request.document_ids).toBeUndefined();
+        return {
+          answer: "Jordan Lee leads the Alpha architecture [1].",
+          sources: [source(1, docAlpha, "Jordan Lee leads the Alpha architecture.", 0.96)],
+        };
+      },
+    });
+    await openApp(page, state);
+
+    // 1. Create a new collection via the "+ Collection" button
+    await page.getByTestId("new-collection-btn").click();
+    const createForm = page.getByTestId("create-collection-form");
+    await expect(createForm).toBeVisible();
+    await page.getByTestId("collection-name-input").fill("Alpha Workspace");
+    await page.getByTestId("collection-description-input").fill("Core Alpha specs");
+    await page.getByTestId("save-collection-btn").click();
+
+    // 2. Verify collection chip is rendered and active
+    const filterBar = page.getByTestId("collection-filter-bar");
+    await expect(filterBar).toBeVisible();
+    const colChip = page.getByTestId("collection-chip-col-1");
+    await expect(colChip).toBeVisible();
+    await expect(colChip).toContainText("Alpha Workspace");
+
+    // 3. Assign alpha-spec.txt to the collection (assign list is shown automatically for empty collections)
+    const folderCard = page.getByTestId("active-collection-card");
+    await expect(folderCard).toBeVisible();
+    const assignList = page.getByTestId("collection-assign-list");
+    await expect(assignList).toBeVisible();
+    await page.getByTestId("assign-doc-doc-alpha").check();
+
+    // 4. Verify document list filters to only alpha-spec.txt and Subjects panel scopes to Jordan Lee
+    await expect(documentButton(page, "alpha-spec.txt")).toBeVisible();
+    await expect(documentButton(page, "beta-notes.txt")).toHaveCount(0);
+    await expect(personButton(page, "Jordan Lee")).toBeVisible();
+    await expect(personButton(page, "Maya Patel")).toHaveCount(0);
+
+    // 5. Verify active collection pill in composer and send a scoped chat question
+    await expect(page.getByTestId("active-collection-pill")).toContainText("Alpha Workspace");
+    await ask(page, "Who leads the Alpha architecture?");
+    const assistant = page.locator(".message.assistant").last();
+    await expect(assistant.locator(".answer-text")).toContainText("Jordan Lee leads the Alpha architecture");
+    await expect(assistant.locator(".source-card")).toHaveCount(1);
+    await expect(assistant.locator(".source-card")).toContainText("alpha-spec.txt");
+
+    // 6. Rename the collection
+    await page.getByTestId("edit-collection-btn").click();
+    const editInput = page.getByTestId("edit-collection-name-input");
+    await expect(editInput).toBeVisible();
+    await editInput.fill("Alpha Project v2");
+    await page.getByTestId("confirm-edit-collection-btn").click();
+    await expect(colChip).toContainText("Alpha Project v2");
+
+    // 7. Delete the collection and verify underlying documents are preserved
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByTestId("delete-collection-btn").click();
+    await expect(page.getByTestId("collection-chip-col-1")).toHaveCount(0);
+    await expect(documentButton(page, "alpha-spec.txt")).toBeVisible();
+    await expect(documentButton(page, "beta-notes.txt")).toBeVisible();
+  });
 });
-
-

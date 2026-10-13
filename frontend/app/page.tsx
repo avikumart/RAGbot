@@ -6,12 +6,23 @@ import { PersonaGraph } from "@/components/persona-graph";
 import { PersonaTimeline } from "@/components/persona-timeline";
 import { PDFViewer } from "@/components/pdf-viewer";
 import type { QueueItem } from "@/components/upload-queue";
-import { api, fetchGraph, fetchPersonTimeline, streamChat } from "@/lib/api";
+import {
+  api,
+  createCollection,
+  deleteCollection,
+  fetchCollections,
+  fetchGraph,
+  fetchPersonTimeline,
+  streamChat,
+  updateCollection,
+  updateCollectionDocuments,
+} from "@/lib/api";
 import type {
   BatchUploadResponse,
   ChatMessage,
   ChatRequest,
   ChatSession,
+  CollectionRecord,
   DocumentRecord,
   GraphData,
   PersonRecord,
@@ -36,6 +47,7 @@ type ConversationCache = {
   activeSessionId: string | null;
   draft: string;
   selectedDocument: string;
+  selectedCollection?: string | null;
   selectedPerson: string | null;
   messages: Message[];
   updatedAt: string;
@@ -144,11 +156,13 @@ export default function Home() {
   const fileInput = useRef<HTMLInputElement>(null);
   const messageEnd = useRef<HTMLDivElement>(null);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
+  const [collections, setCollections] = useState<CollectionRecord[]>([]);
   const [people, setPeople] = useState<PersonRecord[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<string>("all");
+  const [selectedCollection, setSelectedCollection] = useState<string | null>(null);
   const [selectedPerson, setSelectedPerson] = useState<string | null>(null);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(true);
@@ -166,12 +180,43 @@ export default function Home() {
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[] | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
 
+  const scopedDocument = documents.find((document) => document.id === selectedDocument);
+  const scopedCollection = collections.find((collection) => collection.id === selectedCollection) ?? null;
+  const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
+  const hasIndexFailures = documents.some(
+    (document) => documentIndexStatus(document.index_status).tone === "repair",
+  );
+  const allIndexesReady = documents.length > 0
+    && documents.every((document) => document.index_status === "ready");
+
+  const visiblePeople = (() => {
+    if (selectedDocument !== "all") {
+      return people.filter((person) =>
+        scopedDocument?.people.includes(person.name) ||
+        (person.aliases && person.aliases.some((alias) => scopedDocument?.people.includes(alias)))
+      );
+    }
+    if (scopedCollection) {
+      const colDocs = documents.filter((d) => scopedCollection.document_ids.includes(d.id));
+      const colPeople = new Set(colDocs.flatMap((d) => d.people));
+      return people.filter((person) =>
+        colPeople.has(person.name) ||
+        (person.aliases && person.aliases.some((alias) => colPeople.has(alias)))
+      );
+    }
+    return people;
+  })();
+
   useEffect(() => {
     let cancelled = false;
     async function loadGraph() {
       setGraphLoading(true);
       try {
-        const data = await fetchGraph(selectedDocument === "all" ? undefined : selectedDocument);
+        const data = await fetchGraph(
+          selectedDocument === "all" ? undefined : selectedDocument,
+          undefined,
+          selectedCollection ?? undefined
+        );
         if (!cancelled) setGraphData(data);
       } catch {
         if (!cancelled) setGraphData({ nodes: [], edges: [] });
@@ -183,7 +228,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [selectedDocument, documents]);
+  }, [selectedDocument, selectedCollection, documents, collections]);
 
   const effectiveTimelinePerson = selectedPerson || (activeSideTab === "timeline" ? visiblePeople[0]?.name ?? null : null);
 
@@ -198,7 +243,8 @@ export default function Home() {
       try {
         const events = await fetchPersonTimeline(
           effectiveTimelinePerson,
-          selectedDocument === "all" ? undefined : selectedDocument
+          selectedDocument === "all" ? undefined : selectedDocument,
+          selectedCollection ?? undefined
         );
         if (!cancelled) setTimelineEvents(events);
       } catch {
@@ -211,29 +257,17 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [effectiveTimelinePerson, selectedDocument]);
-
-  const scopedDocument = documents.find((document) => document.id === selectedDocument);
-  const totalChunks = documents.reduce((total, document) => total + document.chunk_count, 0);
-  const hasIndexFailures = documents.some(
-    (document) => documentIndexStatus(document.index_status).tone === "repair",
-  );
-  const allIndexesReady = documents.length > 0
-    && documents.every((document) => document.index_status === "ready");
-  const visiblePeople = selectedDocument === "all"
-    ? people
-    : people.filter((person) =>
-        scopedDocument?.people.includes(person.name) ||
-        (person.aliases && person.aliases.some((alias) => scopedDocument?.people.includes(alias)))
-      );
+  }, [effectiveTimelinePerson, selectedDocument, selectedCollection, collections]);
 
   async function refreshLibrary() {
-    const [nextDocuments, nextPeople] = await Promise.all([
+    const [nextDocuments, nextPeople, nextCollections] = await Promise.all([
       api<DocumentRecord[]>("/api/documents"),
       api<PersonRecord[]>("/api/people"),
+      fetchCollections().catch(() => [] as CollectionRecord[]),
     ]);
     setDocuments(nextDocuments);
     setPeople(nextPeople);
+    setCollections(nextCollections);
     return nextDocuments;
   }
 
@@ -280,6 +314,9 @@ export default function Home() {
         setActiveSessionId(cached.activeSessionId);
         setQuestion(cached.draft);
         setSelectedDocument(cached.selectedDocument);
+        if (cached.selectedCollection !== undefined) {
+          setSelectedCollection(cached.selectedCollection);
+        }
         setSelectedPerson(cached.selectedPerson);
         setMessages(cached.messages);
       }
@@ -294,16 +331,18 @@ export default function Home() {
 
     async function initialize() {
       try {
-        const [, nextDocuments, nextPeople, history] = await Promise.all([
+        const [, nextDocuments, nextPeople, history, nextCollections] = await Promise.all([
           api("/api/health"),
           api<DocumentRecord[]>("/api/documents"),
           api<PersonRecord[]>("/api/people"),
           api<{ sessions: ChatSession[] }>("/api/sessions?limit=30"),
+          fetchCollections().catch(() => [] as CollectionRecord[]),
         ]);
         if (cancelled) return;
         setDocuments(nextDocuments);
         setPeople(nextPeople);
         setSessions(history.sessions);
+        setCollections(nextCollections);
         const cached = readConversationCache();
         if (cached?.activeSessionId) {
           try {
@@ -341,6 +380,7 @@ export default function Home() {
       activeSessionId,
       draft: question,
       selectedDocument,
+      selectedCollection,
       selectedPerson,
       messages,
       updatedAt: new Date().toISOString(),
@@ -350,7 +390,7 @@ export default function Home() {
     } catch {
       // Storage quota or privacy settings must never prevent chatting.
     }
-  }, [activeSessionId, cacheHydrated, messages, question, selectedDocument, selectedPerson]);
+  }, [activeSessionId, cacheHydrated, messages, question, selectedDocument, selectedCollection, selectedPerson]);
 
   useEffect(() => {
     messageEnd.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -402,6 +442,7 @@ export default function Home() {
         const uploaded = await api<DocumentRecord>("/api/documents", { method: "POST", body: form });
         const nextDocuments = await refreshLibrary();
         setSelectedDocument(uploaded.id);
+        setSelectedCollection(null);
         setSelectedPerson(null);
         setConnected(true);
         setUploadQueue((current) =>
@@ -472,6 +513,7 @@ export default function Home() {
 
       if (result.documents.length > 0) {
         setSelectedDocument(result.documents[result.documents.length - 1].id);
+        setSelectedCollection(null);
         setSelectedPerson(null);
       }
 
@@ -536,7 +578,10 @@ export default function Home() {
         const session = await api<ChatSession>("/api/sessions", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            document_ids: selectedDocument === "all" ? [] : [selectedDocument],
+            document_ids: selectedDocument === "all"
+              ? (scopedCollection ? scopedCollection.document_ids : [])
+              : [selectedDocument],
+            collection_id: selectedCollection || undefined,
             person: selectedPerson,
           }),
         });
@@ -547,6 +592,7 @@ export default function Home() {
       const request: ChatRequest = {
         message,
         document_ids: selectedDocument === "all" ? undefined : [selectedDocument],
+        collection_id: selectedCollection || undefined,
         person: selectedPerson || undefined,
         session_id: sessionId,
         client_message_id: clientMessageId,
@@ -607,7 +653,7 @@ export default function Home() {
             const next = {
               id: data.session_id,
               topic: data.topic,
-              document_ids: request.document_ids ?? [],
+              document_ids: request.document_ids ?? (scopedCollection ? scopedCollection.document_ids : []),
               person: request.person ?? null,
               created_at: data.user_message.created_at,
               updated_at: data.assistant_message.created_at,
@@ -659,6 +705,7 @@ export default function Home() {
       setActiveSessionId(session.id);
       setMessages((session.messages ?? []).map(asMessage));
       setSelectedDocument(session.document_ids[0] ?? "all");
+      setSelectedCollection(null);
       setSelectedPerson(session.person);
       setQuestion("");
     } catch (error) {
@@ -708,12 +755,86 @@ export default function Home() {
       return;
     }
 
+    setSelectedCollection(null);
     setSelectedDocument(document.id);
     if (selectedPerson) {
       const p = people.find((item) => item.name === selectedPerson);
       const isPresent = document.people.includes(selectedPerson)
         || Boolean(p?.aliases && p.aliases.some((a) => document.people.includes(a)));
       if (!isPresent) setSelectedPerson(null);
+    }
+  }
+
+  function selectCollection(collectionId: string | null) {
+    setSelectedCollection(collectionId);
+    if (collectionId) {
+      setSelectedDocument("all");
+    }
+  }
+
+  async function handleCreateCollection(name: string, description?: string | null) {
+    try {
+      const created = await createCollection({ name, description });
+      setCollections((current) => [created, ...current.filter((c) => c.id !== created.id)]);
+      setSelectedCollection(created.id);
+      setSelectedDocument("all");
+      setNotice(`Collection "${created.name}" created.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not create collection.");
+    }
+  }
+
+  async function handleUpdateCollection(collectionId: string, name: string, description?: string | null) {
+    try {
+      const updated = await updateCollection(collectionId, { name, description });
+      setCollections((current) =>
+        current.map((c) => (c.id === updated.id ? updated : c))
+      );
+      setNotice(`Collection updated to "${updated.name}".`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update collection.");
+    }
+  }
+
+  async function handleDeleteCollection(collection: CollectionRecord) {
+    try {
+      await deleteCollection(collection.id);
+      setCollections((current) => current.filter((c) => c.id !== collection.id));
+      if (selectedCollection === collection.id) {
+        setSelectedCollection(null);
+      }
+      setNotice(`Collection "${collection.name}" was deleted.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not delete collection.");
+    }
+  }
+
+  async function handleToggleCollectionDocument(
+    collectionId: string,
+    documentId: string,
+    shouldInclude: boolean
+  ) {
+    setCollections((current) =>
+      current.map((c) => {
+        if (c.id !== collectionId) return c;
+        const nextIds = shouldInclude
+          ? Array.from(new Set([...c.document_ids, documentId]))
+          : c.document_ids.filter((id) => id !== documentId);
+        return { ...c, document_ids: nextIds, document_count: nextIds.length };
+      })
+    );
+    try {
+      const updated = await updateCollectionDocuments(
+        collectionId,
+        shouldInclude
+          ? { add_document_ids: [documentId], add: [documentId] }
+          : { remove_document_ids: [documentId], remove: [documentId] }
+      );
+      setCollections((current) =>
+        current.map((c) => (c.id === updated.id ? updated : c))
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update collection documents.");
     }
   }
 
@@ -739,6 +860,7 @@ export default function Home() {
       });
       await refreshLibrary();
       setSelectedDocument(doc.id);
+      setSelectedCollection(null);
       setSelectedPerson(null);
       setConnected(true);
     } catch (error) {
@@ -771,13 +893,20 @@ export default function Home() {
         uploadQueue={uploadQueue}
         onRetryQueueItem={(item) => void retryQueueItem(item)}
         onClearQueue={clearQueue}
+        collections={collections}
+        selectedCollection={selectedCollection}
+        onSelectCollection={selectCollection}
+        onCreateCollection={(name, desc) => handleCreateCollection(name, desc)}
+        onUpdateCollection={(id, name, desc) => handleUpdateCollection(id, name, desc)}
+        onDeleteCollection={(col) => handleDeleteCollection(col)}
+        onToggleCollectionDocument={(colId, docId, include) => handleToggleCollectionDocument(colId, docId, include)}
       />
 
       <section className="chat-panel">
         <header className="chat-header">
           <div>
             <span className="eyebrow">Conversation</span>
-            <h1>{sessions.find((session) => session.id === activeSessionId)?.topic ?? scopedDocument?.filename ?? "Your document library"}</h1>
+            <h1>{sessions.find((session) => session.id === activeSessionId)?.topic ?? scopedDocument?.filename ?? scopedCollection?.name ?? "Your document library"}</h1>
           </div>
           <div className="chat-header-actions">
             {activeSessionId && <button className="rename-conversation" type="button" onClick={() => void renameConversation()}>Rename</button>}
@@ -897,6 +1026,16 @@ export default function Home() {
         </div>
 
         <form className="composer" onSubmit={sendMessage}>
+          {scopedCollection && (
+            <button
+              className="active-person active-collection"
+              type="button"
+              onClick={() => setSelectedCollection(null)}
+              data-testid="active-collection-pill"
+            >
+              <span>Collection</span> {scopedCollection.name} ×
+            </button>
+          )}
           {selectedPerson && (
             <button className="active-person" type="button" onClick={() => setSelectedPerson(null)}>
               <span>Person</span> {selectedPerson} ×
@@ -1065,8 +1204,28 @@ export default function Home() {
           )}
           <div className="scope-card">
             <span>Retrieval scope</span>
-            <strong>{selectedDocument === "all" ? "Entire library" : "One document"}</strong>
-            <p title={selectedDocument === "all" ? "Searching every indexed passage." : scopedDocument?.filename}>{selectedDocument === "all" ? "Searching every indexed passage." : scopedDocument?.filename}</p>
+            <strong>
+              {selectedDocument !== "all"
+                ? "One document"
+                : scopedCollection
+                  ? `Collection: ${scopedCollection.name}`
+                  : "Entire library"}
+            </strong>
+            <p
+              title={
+                selectedDocument !== "all"
+                  ? scopedDocument?.filename
+                  : scopedCollection
+                    ? `${scopedCollection.document_ids.length} ${scopedCollection.document_ids.length === 1 ? "document" : "documents"} in collection`
+                    : "Searching every indexed passage."
+              }
+            >
+              {selectedDocument !== "all"
+                ? scopedDocument?.filename
+                : scopedCollection
+                  ? `${scopedCollection.document_ids.length} ${scopedCollection.document_ids.length === 1 ? "document" : "documents"} in collection`
+                  : "Searching every indexed passage."}
+            </p>
           </div>
         </details>
       </aside>
@@ -1078,3 +1237,4 @@ export default function Home() {
     </main>
   );
 }
+

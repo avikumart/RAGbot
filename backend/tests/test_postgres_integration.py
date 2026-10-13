@@ -73,7 +73,7 @@ def test_alembic_baseline_and_store_round_trip(tmp_path):
         assert set(TABLE_COLUMNS) | {"alembic_version"} <= tables
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone()["version_num"] == "005_entity_events"
+        ).fetchone()["version_num"] == "006_document_collections"
 
     with pytest.raises(psycopg.errors.ForeignKeyViolation):
         with store.connect() as connection:
@@ -146,6 +146,8 @@ def test_current_sqlite_database_imports_atomically_and_preserves_chunk_ids(tmp_
         "people": 1,
         "entity_relationships": 1,
         "entity_events": 0,
+        "collections": 0,
+        "collection_documents": 0,
         "vector_index_state": 1,
         "pending_file_cleanup": 0,
         "chat_sessions": 1,

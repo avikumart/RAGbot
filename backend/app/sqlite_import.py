@@ -79,6 +79,17 @@ TABLE_COLUMNS = {
         "client_message_id",
         "created_at",
     ),
+    "collections": (
+        "id",
+        "owner_id",
+        "name",
+        "description",
+        "created_at",
+    ),
+    "collection_documents": (
+        "collection_id",
+        "document_id",
+    ),
 }
 
 
