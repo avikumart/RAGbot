@@ -150,3 +150,41 @@ test("collection API client helpers route to /api/collections endpoints and scop
     globalThis.fetch = originalFetch;
   }
 });
+
+test("generatePersonDossier requests POST /api/people/{name}/dossier with url encoding and scoping", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+  let requestedMethod = null;
+  let requestedBody = null;
+  globalThis.fetch = async (url, init = {}) => {
+    requestedUrl = url;
+    requestedMethod = init.method;
+    requestedBody = init.body ? JSON.parse(init.body) : null;
+    return new Response(
+      JSON.stringify({
+        entity_name: "Maya Patel",
+        generated_at: "2026-10-14T00:00:00Z",
+        scope: { document_ids: ["doc-1"], summary: "1 document" },
+        executive_summary: "Executive summary text.",
+        sections: [],
+        sources: [],
+        markdown: "# Executive Briefing: Maya Patel",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+  try {
+    const { generatePersonDossier } = await import("../lib/api.ts");
+    const result = await generatePersonDossier("Maya Patel", { documentId: "doc-1", collectionId: "col-1" });
+    assert.equal(requestedMethod, "POST");
+    assert.equal(requestedUrl, "/api/people/Maya%20Patel/dossier?document_id=doc-1&collection_id=col-1");
+    assert.equal(requestedBody, null);
+    assert.equal(result.entity_name, "Maya Patel");
+    assert.equal(result.markdown, "# Executive Briefing: Maya Patel");
+
+    await generatePersonDossier("Maya Patel", { documentIds: ["doc-1", "doc-2"] });
+    assert.deepEqual(requestedBody, { document_ids: ["doc-1", "doc-2"] });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

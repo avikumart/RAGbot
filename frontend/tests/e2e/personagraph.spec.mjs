@@ -306,6 +306,64 @@ async function installApi(page, state) {
       return;
     }
 
+    if (pathname.startsWith("/api/people/") && pathname.endsWith("/dossier")) {
+      const parts = pathname.split("/");
+      const personName = decodeURIComponent(parts[3] || "");
+      const dossier = state.dossier || {
+        entity_name: personName,
+        generated_at: "2026-10-14T12:00:00Z",
+        scope: {
+          document_ids: state.documents.map((d) => d.id),
+          summary: "1 document",
+        },
+        executive_summary: `${personName} is a Principal AI Architect leading strategic initiatives [1].`,
+        sections: [
+          {
+            id: "biography",
+            title: "Biography & Current Roles",
+            content: `- Joined Acme Corp as Principal AI Architect in 2020 [1].`,
+            citations: [1],
+            excerpt_ids: [101],
+          },
+          {
+            id: "relationships",
+            title: "Key Relationships & Network",
+            content: `- Collaborates with team leads on architecture [1].`,
+            citations: [1],
+            excerpt_ids: [101],
+          },
+          {
+            id: "projects",
+            title: "Projects & Key Accomplishments",
+            content: `- Spearheaded the Quantum Project rollout [1].`,
+            citations: [1],
+            excerpt_ids: [101],
+          },
+          {
+            id: "quotes",
+            title: "Direct Statements & Positions",
+            content: `- "Reliability is paramount for scalable systems" [1].`,
+            citations: [1],
+            excerpt_ids: [101],
+          },
+        ],
+        sources: [
+          {
+            index: 1,
+            id: 101,
+            document_id: state.documents[0]?.id || "doc-1",
+            filename: state.documents[0]?.filename || "notes.txt",
+            page: 1,
+            excerpt: `${personName} joined Acme Corp as Principal AI Architect in 2020. Reliability is paramount for scalable systems.`,
+            score: 1.0,
+          },
+        ],
+        markdown: `# Executive Briefing: ${personName}\n\n## Executive Summary\n${personName} is a Principal AI Architect leading strategic initiatives [1].\n\n## 1. Biography & Current Roles\n- Joined Acme Corp as Principal AI Architect in 2020 [1].\n\n## 2. Key Relationships & Network\n- Collaborates with team leads on architecture [1].\n\n## 3. Projects & Key Accomplishments\n- Spearheaded the Quantum Project rollout [1].\n\n## 4. Direct Statements & Positions\n- "Reliability is paramount for scalable systems" [1].\n\n---\n### Verified Document Sources\n- [1] **${state.documents[0]?.filename || "notes.txt"}** (page 1, Excerpt ID: \`101\`): "${personName} joined Acme Corp as Principal AI Architect in 2020..."`,
+      };
+      await route.fulfill({ json: dossier });
+      return;
+    }
+
     if (pathname === "/api/graph") {
       const graph = state.graph || {
         nodes: state.people.map((p) => ({
@@ -976,5 +1034,56 @@ test.describe("Connectivity and interaction resilience", () => {
     await expect(page.getByTestId("collection-chip-col-1")).toHaveCount(0);
     await expect(documentButton(page, "alpha-spec.txt")).toBeVisible();
     await expect(documentButton(page, "beta-notes.txt")).toBeVisible();
+  });
+
+  test("generates executive briefing dossier with multi-section tabs, markdown download, and PDF export options", async ({ page }) => {
+    const doc = documentRecord("doc-1", "profile.txt", ["Maya Patel"]);
+    const state = createApiState({
+      documents: [doc],
+      people: [personRecord("Maya Patel")],
+    });
+    await openApp(page, state);
+
+    // 1. Click Generate Dossier quick button on Maya Patel's card
+    const dossierBtn = page.locator(".person-dossier-quickbtn").first();
+    await expect(dossierBtn).toBeVisible();
+    await dossierBtn.click();
+
+    // 2. Verify Dossier modal opens and displays executive briefing
+    const modal = page.locator(".dossier-modal");
+    await expect(modal).toBeVisible();
+    await expect(modal).toContainText("Executive Briefing: Maya Patel");
+    await expect(modal).toContainText("100% Grounded");
+    await expect(modal).toContainText("Biography & Current Roles");
+    await expect(modal).toContainText("Key Relationships & Network");
+    await expect(modal).toContainText("Projects & Key Accomplishments");
+    await expect(modal).toContainText("Direct Statements & Positions");
+
+    // 3. Verify verified document source and citation jump
+    await expect(modal).toContainText("Excerpt ID: #101");
+    await expect(modal.locator(".dossier-cite-btn").first()).toBeVisible();
+
+    // 4. Switch to Markdown Source tab
+    const markdownTab = modal.getByRole("tab", { name: /Markdown Source/i });
+    await markdownTab.click();
+    await expect(modal.locator(".dossier-markdown-pre")).toBeVisible();
+    await expect(modal.locator(".dossier-markdown-pre")).toContainText("# Executive Briefing: Maya Patel");
+
+    // 5. Test Copy Markdown button
+    const copyBtn = modal.locator(".copy-btn");
+    await expect(copyBtn).toBeVisible();
+
+    // 6. Test Download .md button
+    const downloadBtn = modal.locator(".download-btn");
+    await expect(downloadBtn).toBeVisible();
+
+    // 7. Test Export PDF button
+    const pdfBtn = modal.locator(".pdf-btn");
+    await expect(pdfBtn).toBeVisible();
+
+    // 8. Close modal
+    const closeBtn = modal.locator(".dossier-close-btn");
+    await closeBtn.click();
+    await expect(modal).toHaveCount(0);
   });
 });

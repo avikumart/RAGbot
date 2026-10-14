@@ -6,6 +6,7 @@ export function PersonaTimeline({
   loading = false,
   onSelectCitation,
   onSelectPerson,
+  onGenerateDossier,
 }) {
   const [filterQuery, setFilterQuery] = useState("");
   const [sortOrder, setSortOrder] = useState("asc");
@@ -87,6 +88,18 @@ export function PersonaTimeline({
       React.createElement(
         "div",
         { className: "timeline-controls" },
+        onGenerateDossier &&
+          React.createElement(
+            "button",
+            {
+              type: "button",
+              className: "timeline-dossier-btn",
+              onClick: () => onGenerateDossier(personName),
+              title: `Generate executive briefing dossier for ${personName}`,
+              "aria-label": "Generate executive dossier",
+            },
+            "📋 Dossier"
+          ),
         React.createElement(
           "button",
           {
