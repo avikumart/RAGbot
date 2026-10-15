@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 import { DocumentLibrary } from "@/components/document-library";
 import { PersonaGraph } from "@/components/persona-graph";
 import { PersonaTimeline } from "@/components/persona-timeline";
+import { PersonaDossierModal } from "@/components/persona-dossier-modal";
 import { PDFViewer } from "@/components/pdf-viewer";
 import type { QueueItem } from "@/components/upload-queue";
 import {
@@ -13,6 +14,7 @@ import {
   fetchCollections,
   fetchGraph,
   fetchPersonTimeline,
+  generatePersonDossier,
   streamChat,
   updateCollection,
   updateCollectionDocuments,
@@ -24,6 +26,7 @@ import type {
   ChatSession,
   CollectionRecord,
   DocumentRecord,
+  DossierResponse,
   GraphData,
   PersonRecord,
   Source,
@@ -179,6 +182,30 @@ export default function Home() {
   const [activeCitation, setActiveCitation] = useState<Source | null>(null);
   const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[] | null>(null);
   const [timelineLoading, setTimelineLoading] = useState(false);
+  const [dossierOpen, setDossierOpen] = useState(false);
+  const [dossierPerson, setDossierPerson] = useState<string | null>(null);
+  const [dossierData, setDossierData] = useState<DossierResponse | null>(null);
+  const [dossierLoading, setDossierLoading] = useState(false);
+  const [dossierError, setDossierError] = useState<string | null>(null);
+
+  async function handleGenerateDossier(personName: string) {
+    setDossierPerson(personName);
+    setDossierOpen(true);
+    setDossierLoading(true);
+    setDossierError(null);
+    setDossierData(null);
+    try {
+      const data = await generatePersonDossier(personName, {
+        documentId: selectedDocument !== "all" ? selectedDocument : undefined,
+        collectionId: scopedCollection?.id,
+      });
+      setDossierData(data);
+    } catch (err: unknown) {
+      setDossierError(err instanceof Error ? err.message : "Failed to generate dossier.");
+    } finally {
+      setDossierLoading(false);
+    }
+  }
 
   const scopedDocument = documents.find((document) => document.id === selectedDocument);
   const scopedCollection = collections.find((collection) => collection.id === selectedCollection) ?? null;
@@ -1136,12 +1163,23 @@ export default function Home() {
                 choosePerson(name);
                 setActiveSideTab("timeline");
               }}
+              onGenerateDossier={(name) => handleGenerateDossier(name)}
             />
           ) : (
             <>
               <div className="people-heading">
                 <span className="eyebrow">Subjects in scope</span>
                 <span className="people-count">{visiblePeople.length}</span>
+                {selectedPerson && (
+                  <button
+                    type="button"
+                    className="btn-persona-dossier"
+                    onClick={() => handleGenerateDossier(selectedPerson)}
+                    title={`Generate executive briefing dossier for ${selectedPerson}`}
+                  >
+                    📋 Dossier
+                  </button>
+                )}
               </div>
               {loading ? (
                 <div className="people-empty people-loading" role="status"><span className="state-spinner" aria-hidden="true" /><p>Loading subjects…</p></div>
@@ -1176,6 +1214,15 @@ export default function Home() {
                             }}
                           >
                             ⏱
+                          </button>
+                          <button
+                            type="button"
+                            className="person-dossier-quickbtn"
+                            title="Generate executive dossier"
+                            aria-label="Generate executive dossier"
+                            onClick={() => handleGenerateDossier(person.name)}
+                          >
+                            📋
                           </button>
                         </div>
                         {distinctAliases.length > 0 && (
@@ -1233,6 +1280,15 @@ export default function Home() {
         key={activeCitation ? `${activeCitation.document_id}-${activeCitation.index}` : "empty"}
         source={activeCitation}
         onClose={() => setActiveCitation(null)}
+      />
+      <PersonaDossierModal
+        isOpen={dossierOpen}
+        personName={dossierPerson}
+        dossier={dossierData}
+        loading={dossierLoading}
+        error={dossierError}
+        onClose={() => setDossierOpen(false)}
+        onSelectCitation={(source) => setActiveCitation(source)}
       />
     </main>
   );

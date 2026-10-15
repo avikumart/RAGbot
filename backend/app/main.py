@@ -13,12 +13,13 @@ from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import Settings
+from .dossier import generate_persona_dossier
 from .extraction import (
     ExtractedPage,
     ExtractionError,
@@ -92,6 +93,12 @@ class CollectionDocumentsRequest(BaseModel):
 
 class IngestUrlRequest(BaseModel):
     url: str = Field(min_length=3, max_length=2048)
+
+
+class DossierRequest(BaseModel):
+    document_ids: list[str] | None = None
+    document_id: str | None = None
+    collection_id: str | None = None
 
 
 def initial_topic(message: str) -> str:
@@ -459,6 +466,36 @@ def create_app(
         if doc_ids is not None and not doc_ids:
             return []
         return store.get_person_timeline(name, document_ids=doc_ids, owner_id=owner_id)
+
+    @app.post("/api/people/{name}/dossier")
+    def person_dossier(
+        name: str,
+        request: Request,
+        payload: DossierRequest | None = Body(default=None),
+        document_id: str | None = None,
+        collection_id: str | None = None,
+    ) -> dict:
+        owner_id = request_owner(request, settings)
+        req_collection_id = payload.collection_id if payload and payload.collection_id else collection_id
+        req_doc_id = payload.document_id if payload and payload.document_id else document_id
+        req_doc_ids = payload.document_ids if payload and payload.document_ids else None
+        explicit_docs = req_doc_ids or ([req_doc_id] if req_doc_id and req_doc_id != "all" else None)
+
+        doc_ids = resolve_collection_scope(owner_id, req_collection_id, explicit_docs)
+        if doc_ids is not None and not doc_ids:
+            raise HTTPException(status_code=404, detail="No documents found in selected scope.")
+
+        reranker = RerankerService(enabled=settings.reranker_enabled, model_name=settings.reranker_model)
+        return generate_persona_dossier(
+            name=name,
+            store=store,
+            settings=settings,
+            vectors=vectors,
+            reranker=reranker,
+            llm=llm,
+            document_ids=doc_ids,
+            owner_id=owner_id,
+        )
 
     @app.get("/api/graph")
     def graph(

@@ -364,6 +364,70 @@ export async function fetchPersonTimeline(
   return response.json();
 }
 
+export type DossierSection = {
+  id: "biography" | "relationships" | "projects" | "quotes" | string;
+  title: string;
+  content: string;
+  citations: number[];
+  excerpt_ids: number[];
+};
+
+export type DossierSource = {
+  index: number;
+  id: number;
+  document_id: string;
+  filename: string;
+  page: number | null;
+  excerpt: string;
+  score: number;
+};
+
+export type DossierResponse = {
+  entity_name: string;
+  generated_at: string;
+  scope: {
+    document_ids: string[];
+    summary: string;
+  };
+  executive_summary: string;
+  sections: DossierSection[];
+  sources: DossierSource[];
+  markdown: string;
+};
+
+export async function generatePersonDossier(
+  personName: string,
+  options?: {
+    documentId?: string;
+    documentIds?: string[];
+    collectionId?: string;
+  }
+): Promise<DossierResponse> {
+  const params = new URLSearchParams();
+  if (options?.documentId && options.documentId !== "all") {
+    params.set("document_id", options.documentId);
+  }
+  if (options?.collectionId && options.collectionId !== "all") {
+    params.set("collection_id", options.collectionId);
+  }
+  const qs = params.toString();
+  const bodyPayload = options?.documentIds ? JSON.stringify({ document_ids: options.documentIds }) : undefined;
+  const response = await fetch(
+    `/api/people/${encodeURIComponent(personName)}/dossier${qs ? `?${qs}` : ""}`,
+    {
+      method: "POST",
+      headers: {
+        ...(bodyPayload ? { "Content-Type": "application/json" } : {}),
+      },
+      body: bodyPayload,
+    }
+  );
+  if (!response.ok) {
+    throw new Error(await parseApiError(response));
+  }
+  return response.json();
+}
+
 export async function fetchCollections(): Promise<CollectionRecord[]> {
   return api<CollectionRecord[]>("/api/collections");
 }
