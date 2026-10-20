@@ -188,3 +188,33 @@ test("generatePersonDossier requests POST /api/people/{name}/dossier with url en
     globalThis.fetch = originalFetch;
   }
 });
+
+test("fetchAvailableModels requests /api/models and returns registry", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return new Response(
+      JSON.stringify({
+        active_model_id: "cerebras:gpt-oss-120b",
+        active: { provider: "cerebras", model: "gpt-oss-120b" },
+        models: [
+          { id: "cerebras:gpt-oss-120b", provider: "cerebras", model: "gpt-oss-120b", label: "Cerebras: gpt-oss-120b (cloud)", is_local: false, available: true },
+          { id: "ollama:llama3.2", provider: "ollama", model: "llama3.2", label: "Ollama: llama3.2 (local)", is_local: true, available: true },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+  try {
+    const { fetchAvailableModels } = await import("../lib/api.ts");
+    const result = await fetchAvailableModels();
+    assert.equal(requestedUrl, "/api/models");
+    assert.equal(result.active_model_id, "cerebras:gpt-oss-120b");
+    assert.equal(result.models.length, 2);
+    assert.equal(result.models[1].provider, "ollama");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+

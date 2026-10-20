@@ -34,6 +34,18 @@ test("a degraded upload shows Needs repair and remains available to chat", async
       await route.fulfill({ json: { status: "degraded" } });
       return;
     }
+    if (path === "/api/models") {
+      await route.fulfill({
+        json: {
+          active_model_id: "local:grounded",
+          active: { provider: "local", model: "grounded" },
+          models: [
+            { id: "local:grounded", provider: "local", model: "grounded", label: "Local: grounded synthesis (built-in)", is_local: true, available: true }
+          ]
+        }
+      });
+      return;
+    }
     if (path === "/api/documents" && request.method() === "POST") {
       uploaded = true;
       await route.fulfill({ status: 201, json: degradedDocument });

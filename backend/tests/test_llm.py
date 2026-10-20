@@ -10,11 +10,16 @@ from app.llm import (
     GeminiProvider,
     LLMService,
     OpenAICompatibleProvider,
+    create_dynamic_llm_provider,
     create_llm_provider,
+    discover_local_models,
     ensure_bracketed_citations,
     format_source_context,
     generate_with_cerebras,
     generate_with_cerebras_stream,
+    get_available_models,
+    probe_ollama_endpoint,
+    probe_vllm_endpoint,
 )
 
 SOURCES = [
@@ -658,6 +663,245 @@ def test_cerebras_backward_compatible_stream_helper():
             return tokens
 
     assert asyncio.run(run_test()) == ["Streamed helper"]
+
+
+def test_probe_ollama_endpoint_success():
+    async def run_test():
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url == "http://localhost:11434/api/tags"
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "llama3.2:latest",
+                            "model": "llama3.2:latest",
+                            "size": 2019393189,
+                        },
+                        {
+                            "name": "deepseek-r1:8b",
+                            "model": "deepseek-r1:8b",
+                            "size": 4919393189,
+                        },
+                    ]
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            models = await probe_ollama_endpoint("http://localhost:11434", client=client)
+            assert len(models) == 2
+            assert models[0]["id"] == "ollama:llama3.2:latest"
+            assert models[0]["model"] == "llama3.2:latest"
+            assert models[0]["provider"] == "ollama"
+            assert models[0]["label"] == "Ollama: llama3.2:latest (local)"
+            assert models[0]["is_local"] is True
+            assert models[0]["available"] is True
+            assert models[0]["base_url"] == "http://localhost:11434/v1"
+            assert models[1]["id"] == "ollama:deepseek-r1:8b"
+            assert models[1]["model"] == "deepseek-r1:8b"
+
+    asyncio.run(run_test())
+
+
+def test_probe_ollama_endpoint_handles_failures():
+    async def run_test():
+        async def error_handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, text="Internal Server Error")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(error_handler)) as client:
+            models = await probe_ollama_endpoint("http://localhost:11434", client=client)
+            assert models == []
+
+    asyncio.run(run_test())
+
+
+def test_probe_vllm_endpoint_success():
+    async def run_test():
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url == "http://localhost:8000/v1/models"
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "mistralai/Mistral-7B-Instruct-v0.2",
+                            "object": "model",
+                            "owned_by": "vllm",
+                        }
+                    ],
+                },
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            models = await probe_vllm_endpoint("http://localhost:8000", client=client)
+            assert len(models) == 1
+            assert models[0]["id"] == "vllm:mistralai/Mistral-7B-Instruct-v0.2"
+            assert models[0]["model"] == "mistralai/Mistral-7B-Instruct-v0.2"
+            assert models[0]["provider"] == "vllm"
+            assert models[0]["label"] == "vLLM: mistralai/Mistral-7B-Instruct-v0.2 (local)"
+            assert models[0]["is_local"] is True
+            assert models[0]["available"] is True
+            assert models[0]["base_url"] == "http://localhost:8000/v1"
+
+    asyncio.run(run_test())
+
+
+def test_probe_vllm_endpoint_handles_failures():
+    async def run_test():
+        async def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, text="Not Found")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            models = await probe_vllm_endpoint("http://localhost:8000", client=client)
+            assert models == []
+
+    asyncio.run(run_test())
+
+
+def test_discover_local_models():
+    async def run_test():
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if "/api/tags" in str(request.url):
+                return httpx.Response(
+                    200,
+                    json={
+                        "models": [
+                            {"name": "llama3.2", "model": "llama3.2"}
+                        ]
+                    },
+                )
+            if "/v1/models" in str(request.url):
+                return httpx.Response(
+                    200,
+                    json={
+                        "object": "list",
+                        "data": [{"id": "qwen2.5-coder", "object": "model"}],
+                    },
+                )
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            discovered = await discover_local_models(client=client)
+            ids = [m["id"] for m in discovered]
+            assert "ollama:llama3.2" in ids
+            assert "vllm:qwen2.5-coder" in ids
+
+    asyncio.run(run_test())
+
+
+def test_get_available_models_registry(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url="sqlite:///:memory:",
+        max_upload_bytes=1000000,
+        cerebras_api_key="test-cerebras-key",
+        cerebras_base_url="https://api.cerebras.ai/v1",
+        cerebras_model="gpt-oss-120b",
+        cors_origins=(),
+        vector_search_enabled=False,
+        qdrant_url="",
+        qdrant_collection="",
+        embedding_provider="",
+        embedding_model="",
+        embedding_dimensions=0,
+        embedding_batch_size=0,
+        vector_candidate_limit=0,
+        lexical_candidate_limit=0,
+        vector_timeout_seconds=0,
+        embedding_timeout_seconds=0,
+        auth_proxy_secret="",
+        local_development_owner="",
+        reranker_enabled=False,
+        reranker_model="",
+        rerank_top_n=0,
+        chunk_size=0,
+        chunk_overlap=0,
+        llm_provider="cerebras",
+    )
+
+    async def run_test():
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if "/api/tags" in str(request.url):
+                return httpx.Response(
+                    200,
+                    json={"models": [{"name": "mistral", "model": "mistral"}]},
+                )
+            return httpx.Response(404)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            registry = await get_available_models(settings, client=client)
+            assert registry["active_model_id"] == "cerebras:gpt-oss-120b"
+            assert registry["active"]["provider"] == "cerebras"
+            assert registry["active"]["model"] == "gpt-oss-120b"
+            ids = [m["id"] for m in registry["models"]]
+            assert "cerebras:gpt-oss-120b" in ids
+            assert "ollama:mistral" in ids
+            assert "local:grounded" in ids
+
+    asyncio.run(run_test())
+
+
+def test_create_dynamic_llm_provider(tmp_path):
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url="sqlite:///:memory:",
+        max_upload_bytes=1000000,
+        cerebras_api_key="cerebras-key",
+        cerebras_base_url="https://api.cerebras.ai/v1",
+        cerebras_model="gpt-oss-120b",
+        cors_origins=(),
+        vector_search_enabled=False,
+        qdrant_url="",
+        qdrant_collection="",
+        embedding_provider="",
+        embedding_model="",
+        embedding_dimensions=0,
+        embedding_batch_size=0,
+        vector_candidate_limit=0,
+        lexical_candidate_limit=0,
+        vector_timeout_seconds=0,
+        embedding_timeout_seconds=0,
+        auth_proxy_secret="",
+        local_development_owner="",
+        reranker_enabled=False,
+        reranker_model="",
+        rerank_top_n=0,
+        chunk_size=0,
+        chunk_overlap=0,
+        llm_provider="cerebras",
+    )
+
+    # Test local / none
+    assert create_dynamic_llm_provider(provider="local", settings=settings) is None
+    assert create_dynamic_llm_provider(provider="none", settings=settings) is None
+
+    # Test ollama dynamic provider
+    ollama_p = create_dynamic_llm_provider(provider="ollama", model="llama3.2", settings=settings)
+    assert ollama_p is not None
+    assert ollama_p.provider_name == "ollama"
+    assert ollama_p.model_name == "llama3.2"
+    assert ollama_p.is_configured() is True
+
+    # Test vllm dynamic provider
+    vllm_p = create_dynamic_llm_provider(provider="vllm", model="mistral", settings=settings)
+    assert vllm_p is not None
+    assert vllm_p.provider_name == "vllm"
+    assert vllm_p.model_name == "mistral"
+    assert vllm_p.is_configured() is True
+
+    # Test cerebras dynamic provider override model
+    cerebras_p = create_dynamic_llm_provider(provider="cerebras", model="llama-3.3-70b", settings=settings)
+    assert cerebras_p is not None
+    assert cerebras_p.provider_name == "cerebras"
+    assert cerebras_p.model_name == "llama-3.3-70b"
+
+    # Test provider extracted from model string "ollama:deepseek-r1"
+    auto_p = create_dynamic_llm_provider(provider="", model="ollama:deepseek-r1", settings=settings)
+    assert auto_p is not None
+    assert auto_p.provider_name == "ollama"
+    assert auto_p.model_name == "deepseek-r1"
+
 
 
 

@@ -289,6 +289,13 @@ button:focus-visible, textarea:focus-visible, summary:focus-visible {
 .chat-header h1 { max-width: 580px; margin: 5px 0 0; overflow: hidden; color: #252b28; font-family: Georgia, serif; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .chat-header-actions { display: flex; align-items: center; gap: 8px; }
 .rename-conversation { padding: 6px 8px; border: 1px solid #dedbd2; border-radius: 8px; background: #fffefb; color: var(--forest); cursor: pointer; font-size: 9px; font-weight: 700; }
+.model-selector-wrapper { display: flex; align-items: center; }
+.model-selector-container { display: flex; align-items: center; gap: 6px; padding: 4px 10px 4px 8px; border: 1px solid #dedbd2; border-radius: 999px; background: #fffefb; }
+.model-indicator-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.model-indicator-dot.is-local { background: #2b7a78; box-shadow: 0 0 0 2px #d5edea; }
+.model-indicator-dot.is-cloud { background: #d97736; box-shadow: 0 0 0 2px #faeada; }
+.model-selector { border: 0; background: transparent; color: var(--forest); font-size: 9px; font-weight: 700; cursor: pointer; outline: none; padding-right: 2px; max-width: 240px; }
+.model-selector:focus { outline: none; }
 .connection-pill { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid #dedbd2; border-radius: 999px; color: var(--muted); font-size: 9px; }
 .connection-pill span { width: 6px; height: 6px; border-radius: 50%; background: #b6ada2; }
 .connection-pill.is-online span { background: #438b68; box-shadow: 0 0 0 3px #dcede4; }

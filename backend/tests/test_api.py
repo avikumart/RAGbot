@@ -1304,3 +1304,71 @@ def test_collections_multi_tenant_isolation(tmp_path, monkeypatch):
             ).status_code
             == 404
         )
+
+
+def test_get_models_registry(tmp_path):
+    client, _ = client_with_sample(tmp_path)
+    try:
+        response = client.get("/api/models")
+        assert response.status_code == 200
+        payload = response.json()
+        assert "active_model_id" in payload
+        assert "active" in payload
+        assert "models" in payload
+        assert isinstance(payload["models"], list)
+        ids = [m["id"] for m in payload["models"]]
+        assert "cerebras:gpt-oss-120b" in ids
+        assert "local:grounded" in ids
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_chat_per_turn_model_override(tmp_path, monkeypatch):
+    client, document = client_with_sample(tmp_path)
+    try:
+        async def mock_send(self, client_http, *, question, context, history=None):
+            return "Ollama dynamic model response [1]."
+
+        monkeypatch.setattr("app.llm.OpenAICompatibleProvider._send_request", mock_send)
+
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "What does Jordan Lee own?",
+                "document_ids": [document["id"]],
+                "provider": "ollama",
+                "model": "llama3.2",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mode"] == "ollama:llama3.2"
+        assert payload["answer"] == "Ollama dynamic model response [1]."
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_chat_per_turn_model_unreachable_fallback(tmp_path, monkeypatch):
+    client, document = client_with_sample(tmp_path)
+    try:
+        async def mock_fail(self, client_http, *, question, context, history=None):
+            raise httpx.ConnectError("Failed to connect to local Ollama")
+
+        monkeypatch.setattr("app.llm.OpenAICompatibleProvider._send_request", mock_fail)
+
+        response = client.post(
+            "/api/chat",
+            json={
+                "message": "What does Jordan Lee own?",
+                "document_ids": [document["id"]],
+                "provider": "ollama",
+                "model": "llama3.2",
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mode"] == "local-grounded"
+        assert "[1]" in payload["answer"]
+    finally:
+        client.__exit__(None, None, None)
+
