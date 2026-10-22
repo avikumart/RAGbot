@@ -85,7 +85,31 @@ export type ChatRequest = {
   person?: string;
   session_id?: string;
   client_message_id: string;
+  model?: string;
+  provider?: string;
 };
+
+export type ModelOption = {
+  id: string;
+  provider: string;
+  model: string;
+  label: string;
+  is_local: boolean;
+  available: boolean;
+};
+
+export type ModelRegistryResponse = {
+  active_model_id: string;
+  active: {
+    provider: string;
+    model: string;
+  };
+  models: ModelOption[];
+};
+
+export async function fetchAvailableModels(): Promise<ModelRegistryResponse> {
+  return api<ModelRegistryResponse>("/api/models");
+}
 
 export type ChatMessage = {
   id: string;
@@ -164,6 +188,8 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const authenticated =
     path === "/api/health" ||
     path === "/api/chat" ||
+    path === "/api/models" ||
+    path.startsWith("/api/models") ||
     path.startsWith("/api/sessions") ||
     path.startsWith("/api/documents") ||
     path.startsWith("/api/collections") ||

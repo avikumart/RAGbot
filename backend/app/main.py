@@ -31,9 +31,11 @@ from .extraction import (
 from .html_scraper import fetch_and_clean_url
 from .llm import (
     LLMService,
+    create_dynamic_llm_provider,
     create_llm_provider,
     generate_with_cerebras,
     generate_with_cerebras_stream,
+    get_available_models,
 )
 from .reranker import RerankerService
 from .retrieval import hybrid_retrieve, synthesize_answer
@@ -53,6 +55,8 @@ class ChatRequest(BaseModel):
     session_id: str | None = Field(default=None, min_length=8, max_length=128)
     client_message_id: str | None = Field(default=None, min_length=8, max_length=128)
     stream: bool = False
+    model: str | None = Field(default=None, max_length=128)
+    provider: str | None = Field(default=None, max_length=64)
 
 
 class CreateSessionRequest(BaseModel):
@@ -895,6 +899,11 @@ def create_app(
             raise HTTPException(status_code=404, detail="Conversation not found.")
         return Response(status_code=204)
 
+    @app.get("/api/models")
+    async def list_models(request: Request) -> dict:
+        request_owner(request, settings)
+        return await get_available_models(settings)
+
     @app.post("/api/chat", response_model=None)
     async def chat(payload: ChatRequest, request: Request) -> Response | dict:
         owner_id = request_owner(request, settings)
@@ -1002,9 +1011,36 @@ def create_app(
         identified_people, sources, retrieval_mode = retrieval_res[0], retrieval_res[1], retrieval_res[2]
         graph_context = getattr(retrieval_res, "graph_context", "")
 
+        turn_llm = None
+        if payload.provider or payload.model:
+            target_provider = payload.provider or ""
+            target_model = payload.model
+            if not target_provider and target_model and ":" in target_model:
+                target_provider, target_model = target_model.split(":", 1)
+            elif not target_provider:
+                target_provider = settings.llm_provider
+
+            turn_provider = create_dynamic_llm_provider(
+                provider=target_provider,
+                model=target_model,
+                settings=settings,
+            )
+            turn_llm = LLMService(turn_provider)
+
         if is_streaming:
             stream_gen = None
-            if llm_service is not None:
+            if turn_llm is not None:
+                try:
+                    stream_gen, mode = await turn_llm.generate_stream(
+                        question=payload.message,
+                        sources=sources,
+                        history=history,
+                        graph_context=graph_context,
+                    )
+                except Exception as exc:
+                    logger.warning("Dynamic LLM streaming failed; falling back: %s", exc)
+                    stream_gen, mode = None, "local-grounded"
+            elif llm_service is not None:
                 stream_gen, mode = await llm.generate_stream(
                     question=payload.message,
                     sources=sources,
@@ -1108,7 +1144,18 @@ def create_app(
                 },
             )
 
-        if llm_service is not None:
+        if turn_llm is not None:
+            try:
+                generated, mode = await turn_llm.generate(
+                    question=payload.message,
+                    sources=sources,
+                    history=history,
+                    graph_context=graph_context,
+                )
+            except Exception as exc:
+                logger.warning("Dynamic LLM generation failed; falling back: %s", exc)
+                generated, mode = None, "local-grounded"
+        elif llm_service is not None:
             generated, mode = await llm.generate(
                 question=payload.message,
                 sources=sources,

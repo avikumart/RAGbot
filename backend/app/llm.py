@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
@@ -834,4 +836,419 @@ async def generate_with_cerebras_stream(
         graph_context=graph_context,
     ):
         yield token
+
+
+DEFAULT_OLLAMA_ENDPOINTS: list[str] = [
+    "http://host.docker.internal:11434",
+    "http://localhost:11434",
+    "http://127.0.0.1:11434",
+]
+
+DEFAULT_VLLM_ENDPOINTS: list[str] = [
+    "http://host.docker.internal:8000",
+    "http://localhost:8000",
+    "http://host.docker.internal:8001",
+    "http://localhost:8001",
+]
+
+_DISCOVERED_LOCAL_MODELS: dict[str, str] = {}
+
+
+async def probe_ollama_endpoint(
+    endpoint: str,
+    client: httpx.AsyncClient | None = None,
+    timeout: float = 0.8,
+) -> list[dict]:
+    """Queries an Ollama endpoint at /api/tags to discover running models."""
+    url = f"{endpoint.rstrip('/')}/api/tags"
+    try:
+        if client is not None:
+            resp = await client.get(url, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(timeout=timeout) as temp_client:
+                resp = await temp_client.get(url)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if not isinstance(data, dict):
+            return []
+        models_raw = data.get("models")
+        if not isinstance(models_raw, list):
+            return []
+        models: list[dict] = []
+        base_url = f"{endpoint.rstrip('/')}/v1"
+        for item in models_raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("model")
+            if not name or not isinstance(name, str):
+                continue
+            name = name.strip()
+            model_id = f"ollama:{name}"
+            _DISCOVERED_LOCAL_MODELS[model_id] = base_url
+            if name.endswith(":latest"):
+                short_name = name[:-7]
+                _DISCOVERED_LOCAL_MODELS[f"ollama:{short_name}"] = base_url
+            _DISCOVERED_LOCAL_MODELS["ollama"] = base_url
+            models.append({
+                "id": model_id,
+                "provider": "ollama",
+                "model": name,
+                "label": f"Ollama: {name} (local)",
+                "is_local": True,
+                "available": True,
+                "base_url": base_url,
+            })
+        return models
+    except (httpx.HTTPError, asyncio.TimeoutError, json.JSONDecodeError, Exception) as exc:
+        logger.debug("Ollama probe failed for %s: %s", url, exc)
+        return []
+
+
+async def probe_vllm_endpoint(
+    endpoint: str,
+    client: httpx.AsyncClient | None = None,
+    timeout: float = 0.8,
+) -> list[dict]:
+    """Queries a vLLM / OpenAI-compatible endpoint at /v1/models to discover running models."""
+    url = f"{endpoint.rstrip('/')}/v1/models"
+    try:
+        if client is not None:
+            resp = await client.get(url, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(timeout=timeout) as temp_client:
+                resp = await temp_client.get(url)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if not isinstance(data, dict):
+            return []
+        models_raw = data.get("data")
+        if not isinstance(models_raw, list):
+            return []
+        models: list[dict] = []
+        base_url = f"{endpoint.rstrip('/')}/v1"
+        for item in models_raw:
+            if not isinstance(item, dict):
+                continue
+            model_id_val = item.get("id")
+            if not model_id_val or not isinstance(model_id_val, str):
+                continue
+            model_id_val = model_id_val.strip()
+            model_key = f"vllm:{model_id_val}"
+            _DISCOVERED_LOCAL_MODELS[model_key] = base_url
+            _DISCOVERED_LOCAL_MODELS["vllm"] = base_url
+            models.append({
+                "id": model_key,
+                "provider": "vllm",
+                "model": model_id_val,
+                "label": f"vLLM: {model_id_val} (local)",
+                "is_local": True,
+                "available": True,
+                "base_url": base_url,
+            })
+        return models
+    except (httpx.HTTPError, asyncio.TimeoutError, json.JSONDecodeError, Exception) as exc:
+        logger.debug("vLLM probe failed for %s: %s", url, exc)
+        return []
+
+
+async def discover_local_models(
+    client: httpx.AsyncClient | None = None,
+    timeout: float = 0.8,
+) -> list[dict]:
+    """Discovers active local models by probing Ollama and vLLM endpoints."""
+    ollama_candidates: list[str] = []
+    env_ollama = os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_HOST")
+    if env_ollama:
+        cleaned = env_ollama.rstrip("/")
+        if cleaned.endswith("/v1"):
+            cleaned = cleaned[:-3]
+        if cleaned.endswith("/api/tags"):
+            cleaned = cleaned[:-9]
+        ollama_candidates.append(cleaned)
+    for ep in DEFAULT_OLLAMA_ENDPOINTS:
+        if ep not in ollama_candidates:
+            ollama_candidates.append(ep)
+
+    vllm_candidates: list[str] = []
+    env_vllm = os.getenv("VLLM_BASE_URL") or os.getenv("LOCAL_LLM_BASE_URL")
+    if env_vllm:
+        cleaned = env_vllm.rstrip("/")
+        if cleaned.endswith("/v1"):
+            cleaned = cleaned[:-3]
+        if cleaned.endswith("/models"):
+            cleaned = cleaned[:-7]
+        vllm_candidates.append(cleaned)
+    for ep in DEFAULT_VLLM_ENDPOINTS:
+        if ep not in vllm_candidates:
+            vllm_candidates.append(ep)
+
+    tasks = [probe_ollama_endpoint(ep, client=client, timeout=timeout) for ep in ollama_candidates]
+    tasks.extend(probe_vllm_endpoint(ep, client=client, timeout=timeout) for ep in vllm_candidates)
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    discovered: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for res in results:
+        if isinstance(res, list):
+            for m in res:
+                if m["id"] not in seen_ids:
+                    seen_ids.add(m["id"])
+                    discovered.append(m)
+
+    return discovered
+
+
+async def get_available_models(
+    settings: Settings,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Returns all available cloud and detected local models for the registry."""
+    local_models = await discover_local_models(client=client)
+
+    cerebras_key = settings.cerebras_api_key or (
+        settings.llm_api_key if settings.llm_provider == "cerebras" else ""
+    )
+    cerebras_model = settings.cerebras_model or "gpt-oss-120b"
+
+    openai_key = os.getenv("OPENAI_API_KEY", "") or (
+        settings.llm_api_key if settings.llm_provider == "openai" else ""
+    )
+    openai_model = (
+        os.getenv("OPENAI_MODEL", "")
+        or (settings.llm_model if settings.llm_provider == "openai" else "")
+        or "gpt-4o-mini"
+    )
+
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY", "") or (
+        settings.llm_api_key if settings.llm_provider == "anthropic" else ""
+    )
+    anthropic_model = (
+        os.getenv("ANTHROPIC_MODEL", "")
+        or (settings.llm_model if settings.llm_provider == "anthropic" else "")
+        or "claude-3-5-haiku-latest"
+    )
+
+    gemini_key = os.getenv("GEMINI_API_KEY", "") or (
+        settings.llm_api_key if settings.llm_provider == "gemini" else ""
+    )
+    gemini_model = (
+        os.getenv("GEMINI_MODEL", "")
+        or (settings.llm_model if settings.llm_provider == "gemini" else "")
+        or "gemini-1.5-flash"
+    )
+
+    cloud_models: list[dict] = [
+        {
+            "id": f"cerebras:{cerebras_model}",
+            "provider": "cerebras",
+            "model": cerebras_model,
+            "label": f"Cerebras: {cerebras_model} (cloud)",
+            "is_local": False,
+            "available": bool(cerebras_key),
+        },
+        {
+            "id": f"openai:{openai_model}",
+            "provider": "openai",
+            "model": openai_model,
+            "label": f"OpenAI: {openai_model} (cloud)",
+            "is_local": False,
+            "available": bool(openai_key),
+        },
+        {
+            "id": f"anthropic:{anthropic_model}",
+            "provider": "anthropic",
+            "model": anthropic_model,
+            "label": f"Anthropic: {anthropic_model} (cloud)",
+            "is_local": False,
+            "available": bool(anthropic_key),
+        },
+        {
+            "id": f"gemini:{gemini_model}",
+            "provider": "gemini",
+            "model": gemini_model,
+            "label": f"Gemini: {gemini_model} (cloud)",
+            "is_local": False,
+            "available": bool(gemini_key),
+        },
+    ]
+
+    local_grounded = {
+        "id": "local:grounded",
+        "provider": "local",
+        "model": "grounded",
+        "label": "Local: grounded synthesis (built-in)",
+        "is_local": True,
+        "available": True,
+    }
+
+    all_models = [*cloud_models, *local_models, local_grounded]
+
+    # Determine active model
+    configured_provider = settings.llm_provider.lower().strip()
+    active_id: str | None = None
+    active_provider = "local"
+    active_model = "grounded"
+
+    # 1. Check if configured provider matches a cloud model that is available
+    for cm in cloud_models:
+        if cm["provider"] == configured_provider and cm["available"]:
+            active_id = cm["id"]
+            active_provider = cm["provider"]
+            active_model = cm["model"]
+            break
+
+    # 2. Check if configured provider is ollama or vllm and was discovered
+    if not active_id and configured_provider in {"ollama", "vllm"}:
+        for lm in local_models:
+            if lm["provider"] == configured_provider:
+                active_id = lm["id"]
+                active_provider = lm["provider"]
+                active_model = lm["model"]
+                break
+
+    # 3. If no active_id yet, but local models are available, default to first local model
+    if not active_id and local_models:
+        active_id = local_models[0]["id"]
+        active_provider = local_models[0]["provider"]
+        active_model = local_models[0]["model"]
+
+    # 4. Check if any cloud model is available (e.g. cerebras default)
+    if not active_id:
+        for cm in cloud_models:
+            if cm["available"]:
+                active_id = cm["id"]
+                active_provider = cm["provider"]
+                active_model = cm["model"]
+                break
+
+    # 5. Fallback to local grounded
+    if not active_id:
+        active_id = local_grounded["id"]
+        active_provider = local_grounded["provider"]
+        active_model = local_grounded["model"]
+
+    return {
+        "active_model_id": active_id,
+        "active": {
+            "provider": active_provider,
+            "model": active_model,
+        },
+        "models": all_models,
+    }
+
+
+def create_dynamic_llm_provider(
+    *,
+    provider: str,
+    model: str | None = None,
+    settings: Settings,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> LLMProvider | None:
+    """Creates an LLMProvider dynamically for per-turn execution."""
+    clean_model = model.strip() if model else ""
+    prov = provider.strip().lower()
+
+    if ":" in clean_model and not prov:
+        prov_part, model_part = clean_model.split(":", 1)
+        prov = prov_part.strip().lower()
+        clean_model = model_part.strip()
+    elif clean_model.startswith(f"{prov}:"):
+        clean_model = clean_model[len(prov) + 1:].strip()
+
+    if prov in {"", "none", "local", "disabled", "local-grounded"}:
+        return None
+
+    timeout = settings.llm_timeout_seconds
+
+    if prov == "cerebras":
+        return CerebrasProvider(
+            api_key=api_key or settings.cerebras_api_key or (
+                settings.llm_api_key if settings.llm_provider == "cerebras" else ""
+            ),
+            base_url=base_url or settings.cerebras_base_url or "https://api.cerebras.ai/v1",
+            model=clean_model or settings.cerebras_model or "gpt-oss-120b",
+            timeout=timeout,
+        )
+
+    if prov == "ollama":
+        discovered_url = _DISCOVERED_LOCAL_MODELS.get(f"ollama:{clean_model}") or _DISCOVERED_LOCAL_MODELS.get("ollama")
+        target_base_url = (
+            base_url
+            or discovered_url
+            or os.getenv("OLLAMA_BASE_URL")
+            or (settings.llm_base_url if settings.llm_provider == "ollama" else "")
+            or "http://host.docker.internal:11434/v1"
+        )
+        return OpenAICompatibleProvider(
+            api_key=api_key or os.getenv("OLLAMA_API_KEY", "") or (
+                settings.llm_api_key if settings.llm_provider == "ollama" else ""
+            ),
+            base_url=target_base_url,
+            model=clean_model or "llama3.2",
+            provider_label="ollama",
+            timeout=timeout,
+        )
+
+    if prov == "vllm":
+        discovered_url = _DISCOVERED_LOCAL_MODELS.get(f"vllm:{clean_model}") or _DISCOVERED_LOCAL_MODELS.get("vllm")
+        target_base_url = (
+            base_url
+            or discovered_url
+            or os.getenv("VLLM_BASE_URL")
+            or (settings.llm_base_url if settings.llm_provider == "vllm" else "")
+            or "http://host.docker.internal:8000/v1"
+        )
+        return OpenAICompatibleProvider(
+            api_key=api_key or os.getenv("VLLM_API_KEY", "") or (
+                settings.llm_api_key if settings.llm_provider == "vllm" else ""
+            ),
+            base_url=target_base_url,
+            model=clean_model or "default",
+            provider_label="vllm",
+            timeout=timeout,
+        )
+
+    if prov == "openai":
+        return OpenAICompatibleProvider(
+            api_key=api_key or os.getenv("OPENAI_API_KEY", "") or (
+                settings.llm_api_key if settings.llm_provider == "openai" else ""
+            ),
+            base_url=base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            model=clean_model or os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            provider_label="openai",
+            timeout=timeout,
+        )
+
+    if prov == "anthropic":
+        return AnthropicProvider(
+            api_key=api_key or os.getenv("ANTHROPIC_API_KEY", "") or (
+                settings.llm_api_key if settings.llm_provider == "anthropic" else ""
+            ),
+            base_url=base_url or os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
+            model=clean_model or os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest"),
+            timeout=timeout,
+        )
+
+    if prov == "gemini":
+        return GeminiProvider(
+            api_key=api_key or os.getenv("GEMINI_API_KEY", "") or (
+                settings.llm_api_key if settings.llm_provider == "gemini" else ""
+            ),
+            base_url=base_url or os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"),
+            model=clean_model or os.getenv("GEMINI_MODEL", "gemini-1.5-flash"),
+            timeout=timeout,
+        )
+
+    return OpenAICompatibleProvider(
+        api_key=api_key or settings.llm_api_key,
+        base_url=base_url or settings.llm_base_url,
+        model=clean_model or settings.llm_model or "default",
+        provider_label=prov,
+        timeout=timeout,
+    )
+
 

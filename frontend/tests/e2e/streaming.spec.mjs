@@ -51,6 +51,18 @@ test("streams tokens and metadata in real-time via Server-Sent Events", async ({
       await route.fulfill({ json: { status: "ok" } });
       return;
     }
+    if (pathname === "/api/models") {
+      await route.fulfill({
+        json: {
+          active_model_id: "cerebras:gpt-oss-120b",
+          active: { provider: "cerebras", model: "gpt-oss-120b" },
+          models: [
+            { id: "cerebras:gpt-oss-120b", provider: "cerebras", model: "gpt-oss-120b", label: "Cerebras: gpt-oss-120b (cloud)", is_local: false, available: true }
+          ]
+        }
+      });
+      return;
+    }
     if (pathname === "/api/documents" && request.method() === "GET") {
       await route.fulfill({ json: [doc] });
       return;

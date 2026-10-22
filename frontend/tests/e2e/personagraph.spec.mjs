@@ -109,6 +109,21 @@ async function installApi(page, state) {
       return;
     }
 
+    if (pathname === "/api/models" && method === "GET") {
+      await route.fulfill({
+        json: {
+          active_model_id: "cerebras:gpt-oss-120b",
+          active: { provider: "cerebras", model: "gpt-oss-120b" },
+          models: [
+            { id: "cerebras:gpt-oss-120b", provider: "cerebras", model: "gpt-oss-120b", label: "Cerebras: gpt-oss-120b (cloud)", is_local: false, available: true },
+            { id: "ollama:llama3.2", provider: "ollama", model: "llama3.2", label: "Ollama: llama3.2 (local)", is_local: true, available: true },
+            { id: "local:grounded", provider: "local", model: "grounded", label: "Local: grounded synthesis (built-in)", is_local: true, available: true },
+          ],
+        },
+      });
+      return;
+    }
+
     if (pathname === "/api/collections" && method === "GET") {
       await route.fulfill({ json: state.collections });
       return;
@@ -1086,4 +1101,37 @@ test.describe("Connectivity and interaction resilience", () => {
     await closeBtn.click();
     await expect(modal).toHaveCount(0);
   });
+
+  test("allows switching active LLM models from the chat header dropdown and sends provider/model overrides", async ({ page }) => {
+    const doc = documentRecord("doc-1", "notes.txt", ["Jordan Lee"]);
+    const state = createApiState({
+      documents: [doc],
+      people: [personRecord("Jordan Lee")],
+    });
+    await openApp(page, state);
+
+    // 1. Verify model selector is visible in the chat header actions
+    const modelSelector = page.locator("#model-selector");
+    await expect(modelSelector).toBeVisible();
+
+    // 2. Verify options include local and cloud models with bullet indicators
+    await expect(modelSelector.locator("option")).toHaveCount(3);
+    await expect(modelSelector.locator("option").nth(0)).toContainText("Cerebras: gpt-oss-120b (cloud)");
+    await expect(modelSelector.locator("option").nth(1)).toContainText("Ollama: llama3.2 (local)");
+    await expect(modelSelector.locator("option").nth(2)).toContainText("Local: grounded synthesis (built-in)");
+
+    // 3. Switch to Ollama local model
+    await modelSelector.selectOption("ollama:llama3.2");
+    await expect(modelSelector).toHaveValue("ollama:llama3.2");
+
+    // 4. Send a question and verify that the chat request contains provider="ollama" and model="llama3.2"
+    await ask(page, "What does Jordan Lee do?");
+
+    // 5. Verify request received by API
+    await expect.poll(() => state.chatRequests.length).toBe(1);
+    const lastRequest = state.chatRequests[0];
+    expect(lastRequest.provider).toBe("ollama");
+    expect(lastRequest.model).toBe("llama3.2");
+  });
 });
+

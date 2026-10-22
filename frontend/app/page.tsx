@@ -11,6 +11,7 @@ import {
   api,
   createCollection,
   deleteCollection,
+  fetchAvailableModels,
   fetchCollections,
   fetchGraph,
   fetchPersonTimeline,
@@ -28,6 +29,7 @@ import type {
   DocumentRecord,
   DossierResponse,
   GraphData,
+  ModelOption,
   PersonRecord,
   Source,
   TimelineEvent,
@@ -187,6 +189,8 @@ export default function Home() {
   const [dossierData, setDossierData] = useState<DossierResponse | null>(null);
   const [dossierLoading, setDossierLoading] = useState(false);
   const [dossierError, setDossierError] = useState<string | null>(null);
+  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState<string>("default");
 
   async function handleGenerateDossier(personName: string) {
     setDossierPerson(personName);
@@ -358,18 +362,28 @@ export default function Home() {
 
     async function initialize() {
       try {
-        const [, nextDocuments, nextPeople, history, nextCollections] = await Promise.all([
+        const [, nextDocuments, nextPeople, history, nextCollections, modelsRegistry] = await Promise.all([
           api("/api/health"),
           api<DocumentRecord[]>("/api/documents"),
           api<PersonRecord[]>("/api/people"),
           api<{ sessions: ChatSession[] }>("/api/sessions?limit=30"),
           fetchCollections().catch(() => [] as CollectionRecord[]),
+          fetchAvailableModels().catch(() => null),
         ]);
         if (cancelled) return;
         setDocuments(nextDocuments);
         setPeople(nextPeople);
         setSessions(history.sessions);
         setCollections(nextCollections);
+        if (modelsRegistry && modelsRegistry.models) {
+          setAvailableModels(modelsRegistry.models);
+          const cachedModel = localStorage.getItem("personagraph.selected-model");
+          if (cachedModel && modelsRegistry.models.some((m) => m.id === cachedModel && m.available)) {
+            setSelectedModelId(cachedModel);
+          } else if (modelsRegistry.active_model_id) {
+            setSelectedModelId(modelsRegistry.active_model_id);
+          }
+        }
         const cached = readConversationCache();
         if (cached?.activeSessionId) {
           try {
@@ -616,6 +630,7 @@ export default function Home() {
         setActiveSessionId(session.id);
         setSessions((current) => [session, ...current]);
       }
+      const chosenModel = availableModels.find((m) => m.id === selectedModelId);
       const request: ChatRequest = {
         message,
         document_ids: selectedDocument === "all" ? undefined : [selectedDocument],
@@ -623,6 +638,8 @@ export default function Home() {
         person: selectedPerson || undefined,
         session_id: sessionId,
         client_message_id: clientMessageId,
+        provider: chosenModel?.provider,
+        model: chosenModel?.model,
       };
       await streamChat(request, {
         onMetadata: (meta) => {
@@ -937,6 +954,40 @@ export default function Home() {
           </div>
           <div className="chat-header-actions">
             {activeSessionId && <button className="rename-conversation" type="button" onClick={() => void renameConversation()}>Rename</button>}
+            {availableModels.length > 0 && (
+              <div className="model-selector-wrapper">
+                <label htmlFor="model-selector" className="sr-only">Select Model</label>
+                <div className="model-selector-container">
+                  <span
+                    className={`model-indicator-dot ${
+                      availableModels.find((m) => m.id === selectedModelId)?.is_local
+                        ? "is-local"
+                        : "is-cloud"
+                    }`}
+                    title={availableModels.find((m) => m.id === selectedModelId)?.is_local ? "Local Model" : "Cloud Model"}
+                  />
+                  <select
+                    id="model-selector"
+                    className="model-selector"
+                    aria-label="Select Model"
+                    data-testid="model-selector"
+                    value={selectedModelId}
+                    onChange={(e) => {
+                      setSelectedModelId(e.target.value);
+                      try {
+                        localStorage.setItem("personagraph.selected-model", e.target.value);
+                      } catch {}
+                    }}
+                  >
+                    {availableModels.map((m) => (
+                      <option key={m.id} value={m.id} disabled={!m.available}>
+                        {m.label.startsWith("●") ? m.label : `● ${m.label}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
             <div className={`connection-pill ${connected ? "is-online" : ""}`}>
               <span />
               {loading
